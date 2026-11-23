@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.netpulse.netpulse_router_manager"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37 // flutter_local_notifications requires >= 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
