@@ -2,6 +2,8 @@
     <!-- Local router access only (192.168.1.1 by default). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Quota alerts (Android 13+ asks the user at runtime). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="NetPulse"
         android:networkSecurityConfig="@xml/network_security_config"

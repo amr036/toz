@@ -18,6 +18,8 @@ It focuses on **internet usage tracking (حساب الاستهلاك)** and **Wi
 | **Usage & quota** | Delta-based counting that survives router reboots and 32-bit counter wraps. Includes a glitch filter, per-day ledger, ISP calibration, presets (140 / 250 / 500 GB / 1 TB / custom), renewal day, and an "include upload" switch. A 270° gauge shows used / remaining / %, daily average, projected total at renewal, days until the quota runs out, days until renewal, daily budget, a 7/30-day chart, and warnings at 75 / 90 / 100 % |
 | **Wi-Fi control** | Speed presets (Unlimited, 2, 6, 10, 20 Mbps, or a custom 1–100 Mbps slider) with an Apply button and an "active" badge. SSID and password, max clients, transmit power, and DNS presets (ISP default, Cloudflare 1.1.1.1, Cloudflare Family, AdGuard Family, Google, custom) |
 | **Devices** | Name, IP, MAC, band (2.4 GHz / 5 GHz / Ethernet), signal strength, online/offline |
+| **Background sync** | Android WorkManager reads the router counters about every 15 minutes while the app is closed, so usage keeps counting and reboots aren't missed. It is skipped in demo mode and while the app itself is polling |
+| **Quota alerts** | Android notifications at 75 / 90 / 100 %, each sent once per billing cycle, from the app or the background job |
 
 ## Project structure
 
@@ -26,6 +28,8 @@ lib/
 ├── main.dart                     # ProviderScope + SharedPreferences bootstrap
 ├── app.dart                      # MaterialApp, locale/RTL, theme, setup⇄home gate
 ├── core/
+│   ├── background/background_sync.dart   # WorkManager usage sync (Android)
+│   ├── notifications/usage_alerts.dart   # 75/90/100 % notifications
 │   ├── config/app_config.dart    # DEMO_MODE default, poll intervals, presets
 │   ├── l10n/app_strings.dart     # AR/EN string table → context.tr('key')
 │   ├── state/app_state.dart      # settings, router session, live polling (Riverpod)
@@ -63,7 +67,7 @@ Requirements: Flutter **stable 3.47 or newer** (the project uses the `material_u
 
 ```bash
 flutter pub get
-flutter test                    # 19 unit tests (usage math, reboot/wrap handling, mock driver)
+flutter test                    # 22 unit tests (usage math, reboot/wrap handling, alerts, mock driver)
 ```
 
 ### 1. Cloud IDE / web preview (demo mode)
@@ -90,7 +94,9 @@ The demo login is `admin` / `demo`.
 5. Build an APK to install: `flutter build apk --release --dart-define=DEMO_MODE=false`. The file is at `build/app/outputs/flutter-apk/app-release.apk`.
 
 Android notes:
-* `AndroidManifest.xml` declares `INTERNET`.
+* `AndroidManifest.xml` declares `INTERNET` and `POST_NOTIFICATIONS`. On Android 13+ the app asks for notification permission after the first connection.
+* Core library desugaring is enabled in `android/app/build.gradle.kts`, as `flutter_local_notifications` requires.
+* Background sync runs at most every 15 minutes (the Android minimum), and only when a network is available. Battery savers on some phones (Xiaomi, Huawei, Oppo) delay it; allow the app to run in the background in battery settings for the most accurate tracking.
 * `res/xml/network_security_config.xml` allows cleartext HTTP. The router serves `http://192.168.1.1`, and the IP is user-configurable, so a per-domain rule isn't possible.
 * Flutter Web can't talk to the real router because the browser blocks it with CORS. Use Android for real hardware.
 
@@ -168,7 +174,8 @@ Check which interfaces your firmware lists under QoS → Shaper. If the firmware
 * **Glitch filter:** a delta larger than a 1 Gbps link could carry in the elapsed time is discarded, and the counter is re-baselined.
 * **Billing cycle:** the cycle total is the sum of the days inside it. Rollover and renewal-day changes need no special handling. Renewal day 29–31 is clamped in short months.
 * **Calibration:** the offset needed to match your ISP portal's figure is stored for the current cycle only. Daily history is never rewritten.
-* **Known limit:** traffic between the app's last poll and a router reboot can't be recovered. Calibrate against the ISP portal occasionally.
+* **App closed:** the background job keeps polling roughly every 15 minutes. Traffic in the gap between the last poll and a router reboot (at most ~15 minutes) can still be lost, so calibrate against the ISP portal occasionally.
+* **Hand-over:** the app writes a heartbeat while it polls, the background job skips while that heartbeat is fresh, and the app reloads the ledger when it comes back to the foreground. That way only one side writes the ledger at a time.
 * GB means 10⁹ bytes, as most ISPs bill. Change `bytesPerGb` in `usage_models.dart` if yours uses GiB.
 
 ## Adding another router (ZTE H188A, Huawei HG633 / DN8245, …)

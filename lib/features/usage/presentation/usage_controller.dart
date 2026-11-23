@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/background/background_sync.dart';
+import '../../../core/notifications/usage_alerts.dart';
 import '../../../core/state/app_state.dart';
 import '../../../drivers/router_models.dart';
 import '../data/usage_repository.dart';
@@ -27,11 +29,13 @@ final usageServiceProvider = Provider<UsageCalculatorService>((ref) => UsageCalc
 
 class UsageController extends Notifier<UsageState> {
   late UsageRepository _repo;
+  late bool _demo;
   UsageCalculatorService get _svc => ref.read(usageServiceProvider);
 
   @override
   UsageState build() {
     final demo = ref.watch(appSettingsProvider.select((s) => s.demoMode));
+    _demo = demo;
     _repo = UsageRepository(ref.watch(sharedPrefsProvider), demo: demo);
     final ledger = _repo.loadLedger();
     if (demo && ledger.daily.isEmpty) {
@@ -57,6 +61,10 @@ class UsageController extends Notifier<UsageState> {
     final event = _svc.ingest(ledger, counters);
     _repo.saveLedger(ledger);
     _emit(ledger, event: event);
+    final prefs = ref.read(sharedPrefsProvider);
+    // Tells the background worker the app is actively counting.
+    prefs.setInt(BackgroundSync.foregroundHeartbeatKey, DateTime.now().millisecondsSinceEpoch);
+    UsageAlerts.check(prefs, state.stats, demo: _demo);
   }
 
   Future<void> setQuota(QuotaSettings q) async {

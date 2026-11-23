@@ -226,6 +226,7 @@ class LiveController extends Notifier<LiveState> {
   Timer? _timer;
   int _tick = 0;
   bool _busy = false;
+  bool _paused = false;
   static const _historyLen = 40;
 
   @override
@@ -243,9 +244,18 @@ class LiveController extends Notifier<LiveState> {
     return const LiveState();
   }
 
+  /// Stop polling while the app is in the background (the WorkManager job
+  /// takes over counting), resume when it comes back.
+  void pause() => _paused = true;
+
+  void resume() {
+    _paused = false;
+    refresh(forceStatus: true);
+  }
+
   Future<void> refresh({bool forceStatus = false}) async {
     final driver = ref.read(sessionProvider).driver;
-    if (driver == null || _busy) return;
+    if (driver == null || _busy || _paused) return;
     _busy = true;
     if (forceStatus && ref.mounted) state = state.copyWith(loading: true);
     try {

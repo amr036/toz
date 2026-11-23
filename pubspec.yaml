@@ -35,6 +35,8 @@ dependencies:
   # Router admin page fallback
   webview_flutter: ^4.14.1
   url_launcher: ^6.3.3
+  workmanager: ^0.10.10
+  flutter_local_notifications: ^23.0.4
 
 dev_dependencies:
   flutter_test:
