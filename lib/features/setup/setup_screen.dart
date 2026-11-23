@@ -8,6 +8,7 @@ import '../../core/widgets/common.dart';
 import '../../drivers/driver_registry.dart';
 import '../../drivers/mock/mock_router_driver.dart';
 import '../../drivers/router_models.dart';
+import '../diagnostics/diagnostics_screen.dart';
 
 /// Login / router setup. Also reachable from the dashboard to switch router
 /// or leave demo mode.
@@ -67,15 +68,24 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
     super.dispose();
   }
 
+  RouterCredentials _formCredentials() => RouterCredentials(
+        gatewayIp: _ip.text.trim(),
+        username: _user.text.trim(),
+        password: _pass.text,
+        useHttps: _https,
+      );
+
+  void _openDiagnostics() {
+    if (!_form.currentState!.validate()) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => DiagnosticsScreen(credentials: _formCredentials()),
+    ));
+  }
+
   Future<void> _connect() async {
     if (!_form.currentState!.validate()) return;
     setState(() => _busy = true);
-    final ok = await ref.read(sessionProvider.notifier).connect(RouterCredentials(
-          gatewayIp: _ip.text.trim(),
-          username: _user.text.trim(),
-          password: _pass.text,
-          useHttps: _https,
-        ));
+    final ok = await ref.read(sessionProvider.notifier).connect(_formCredentials());
     if (!mounted) return;
     setState(() => _busy = false);
     if (ok && widget.pushed) Navigator.of(context).pop();
@@ -223,6 +233,13 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                         ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                         : const Icon(Icons.login),
                     label: Text(_busy ? context.tr('connecting') : context.tr('connect')),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(minimumSize: const Size(64, 48)),
+                    onPressed: _busy ? null : _openDiagnostics,
+                    icon: const Icon(Icons.network_check),
+                    label: Text(context.tr('diagButton')),
                   ),
                   if (widget.pushed && session.isConnected) ...[
                     const SizedBox(height: 12),

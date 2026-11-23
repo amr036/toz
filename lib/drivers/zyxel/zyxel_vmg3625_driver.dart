@@ -2,10 +2,10 @@ import 'dart:convert';
 
 import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
-import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:flutter/foundation.dart';
 
 import '../router_driver.dart';
+import 'http_adapter_stub.dart' if (dart.library.io) 'http_adapter_io.dart';
 import 'zyxel_crypto.dart';
 import 'zyxel_endpoints.dart';
 
@@ -27,15 +27,18 @@ class ZyxelVmg3625Driver extends RouterDriver {
   ZyxelVmg3625Driver(
     super.credentials, {
     this.endpoints = const ZyxelEndpoints(),
+    this.trace,
     Dio? dio,
   }) : _dio = dio ?? _buildDio(credentials) {
-    if (!kIsWeb) {
-      // Browsers manage cookies themselves; on Android we keep our own jar.
-      _dio.interceptors.add(CookieManager(_cookieJar));
-    }
+    _setup();
   }
 
   final ZyxelEndpoints endpoints;
+
+  /// Optional step-by-step log (used by the connection test screen).
+  /// Never receives the password.
+  final void Function(String line)? trace;
+
   final Dio _dio;
   final CookieJar _cookieJar = CookieJar();
 
@@ -45,6 +48,10 @@ class ZyxelVmg3625Driver extends RouterDriver {
   Map<String, dynamic>? _lastWlanObject;
   int _wlanIndex = 1;
 
+  /// True once we detected the router forces HTTPS.
+  bool get usingHttps => _dio.options.baseUrl.startsWith('https');
+  bool get encrypted => _crypto != null;
+
   static Dio _buildDio(RouterCredentials c) => Dio(BaseOptions(
         baseUrl: c.baseUrl,
         connectTimeout: const Duration(seconds: 6),
@@ -53,8 +60,22 @@ class ZyxelVmg3625Driver extends RouterDriver {
         responseType: ResponseType.plain, // we decode ourselves (encrypted or not)
         validateStatus: (_) => true,
         followRedirects: false,
-        headers: {'Accept': 'application/json, text/plain, */*'},
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
       ));
+
+  void _setup() {
+    // Routers use self-signed certificates; they are accepted ONLY for the
+    // configured gateway host (see http_adapter_io.dart).
+    configureRouterHttp(_dio, _cookieJar, credentials.gatewayIp.split(':').first);
+  }
+
+  void _log(String line) {
+    trace?.call(line);
+    if (kDebugMode) debugPrint('[Zyxel] $line');
+  }
 
   @override
   String get modelName => 'ZYXEL VMG3625-T50B';
@@ -70,29 +91,69 @@ class ZyxelVmg3625Driver extends RouterDriver {
   // Session
   // ---------------------------------------------------------------------------
 
-  Future<void> _probeEncryption() async {
+  RouterException _netError(DioException e) {
+    final msg = switch (e.type) {
+      DioExceptionType.connectionTimeout => 'Connection timed out (${_dio.options.baseUrl})',
+      DioExceptionType.receiveTimeout => 'Router did not answer in time',
+      DioExceptionType.connectionError => 'Cannot connect to ${_dio.options.baseUrl}: ${e.error ?? e.message}',
+      _ => '${e.type.name}: ${e.error ?? e.message}',
+    };
+    _log('NETWORK ERROR: $msg');
+    return RouterException(RouterErrorCode.unreachable, msg);
+  }
+
+  /// Detects HTTP→HTTPS redirect and the encrypted (RSA/AES) web API.
+  Future<void> _probe() async {
     if (_encryptionProbed) return;
-    _encryptionProbed = true;
     try {
+      final root = await _dio.get<String>('/');
+      _log('GET / → HTTP ${root.statusCode}');
+      final location = root.headers.value('location') ?? '';
+      if ((root.statusCode == 301 || root.statusCode == 302 || root.statusCode == 307) &&
+          location.startsWith('https://') &&
+          !usingHttps) {
+        _dio.options.baseUrl = _dio.options.baseUrl.replaceFirst('http://', 'https://');
+        _log('Router redirects to HTTPS → switching to ${_dio.options.baseUrl}');
+      }
+
       final res = await _dio.get<String>(endpoints.rsaPublicKey);
+      _log('GET ${endpoints.rsaPublicKey} → HTTP ${res.statusCode}');
       if (res.statusCode == 200) {
         final body = _decodeJson(res.data);
         final pem = body is Map ? body['RSAPublicKey'] : null;
         if (pem is String && pem.isNotEmpty) {
           _crypto = ZyxelCrypto(pem);
-          debugPrint('[Zyxel] encrypted web API detected');
+          _log('Encrypted web API detected (RSA + AES-256-CBC)');
+        } else {
+          _log('No RSA key in response → plain JSON API');
         }
+      } else {
+        _log('No RSA endpoint → plain JSON API');
       }
+      _encryptionProbed = true;
     } on DioException catch (e) {
-      throw RouterException(RouterErrorCode.unreachable, e.message);
+      throw _netError(e);
+    } on RouterException {
+      rethrow;
     } catch (e) {
-      debugPrint('[Zyxel] RSA probe failed, using plain JSON: $e');
+      _encryptionProbed = true;
+      _log('RSA key could not be parsed ($e) → trying plain JSON');
+    }
+  }
+
+  dynamic _decodeBody(Response<String> res) {
+    final raw = _decodeJson(res.data);
+    try {
+      return _crypto?.decrypt(raw) ?? raw;
+    } catch (e) {
+      _log('Could not decrypt response: $e');
+      return raw;
     }
   }
 
   @override
   Future<void> login() async {
-    await _probeEncryption();
+    await _probe();
     final payload = {
       'Input_Account': credentials.username,
       'Input_Passwd': base64Encode(utf8.encode(credentials.password)),
@@ -109,27 +170,31 @@ class ZyxelVmg3625Driver extends RouterDriver {
         options: Options(contentType: 'application/json'),
       );
     } on DioException catch (e) {
-      throw RouterException(RouterErrorCode.unreachable, e.message);
+      throw _netError(e);
     }
 
-    final body = _crypto?.decrypt(_decodeJson(res.data)) ?? _decodeJson(res.data);
+    final body = _decodeBody(res);
     final result = body is Map ? '${body['result'] ?? ''}' : '';
+    _log('POST ${endpoints.login} (user "${credentials.username}") → HTTP ${res.statusCode}, '
+        'result="$result"${body is Map && body['message'] != null ? ', message="${body['message']}"' : ''}');
     if (res.statusCode == 200 && result == 'ZCFG_SUCCESS') {
       _sessionKey = '${body['sessionkey'] ?? body['sessionKey'] ?? ''}';
       _dio.options.headers['CSRFToken'] = _sessionKey;
+      _log('Logged in (session key ${_sessionKey!.isEmpty ? 'missing!' : 'received'})');
       return;
     }
 
-    final lower = result.toLowerCase();
-    if (lower.contains('limit') || lower.contains('already') || lower.contains('lock')) {
-      throw RouterException(RouterErrorCode.tooManySessions, result);
+    final detail = '$result ${body is Map ? (body['message'] ?? '') : ''}'.trim();
+    final lower = detail.toLowerCase();
+    if (lower.contains('limit') || lower.contains('already') || lower.contains('lock') || lower.contains('retry')) {
+      throw RouterException(RouterErrorCode.tooManySessions, detail);
     }
-    if (res.statusCode == 401 || lower.contains('invalid') || lower.contains('password')) {
-      throw RouterException(RouterErrorCode.invalidCredentials, result);
+    if (res.statusCode == 401 || lower.contains('invalid') || lower.contains('password') || lower.contains('incorrect')) {
+      throw RouterException(RouterErrorCode.invalidCredentials, detail);
     }
     throw RouterException(
       RouterErrorCode.unexpectedResponse,
-      'HTTP ${res.statusCode}: ${_truncate(res.data)}',
+      'HTTP ${res.statusCode}: ${_preview(body)}',
     );
   }
 
@@ -137,7 +202,8 @@ class ZyxelVmg3625Driver extends RouterDriver {
   Future<void> logout() async {
     if (_sessionKey == null) return;
     try {
-      await _dio.post<String>(endpoints.logout);
+      final res = await _dio.post<String>(endpoints.logout);
+      _log('POST ${endpoints.logout} → HTTP ${res.statusCode}');
     } catch (_) {
       // Best effort — the router frees idle sessions after a few minutes anyway.
     }
@@ -149,6 +215,19 @@ class ZyxelVmg3625Driver extends RouterDriver {
   // DAL helpers
   // ---------------------------------------------------------------------------
 
+  /// Raw decoded body of `GET /cgi-bin/DAL?oid=…` (for diagnostics).
+  Future<dynamic> rawDal(String oid) async {
+    if (!isLoggedIn) await login();
+    try {
+      final res = await _dio.get<String>(endpoints.dal(oid));
+      final body = _decodeBody(res);
+      _log('GET ${endpoints.dal(oid)} → HTTP ${res.statusCode}, result="${body is Map ? body['result'] : '?'}"');
+      return body;
+    } on DioException catch (e) {
+      throw _netError(e);
+    }
+  }
+
   /// GET /cgi-bin/DAL?oid=… and return the `Object` list.
   Future<List<Map<String, dynamic>>> _dalGet(String oid, {bool retried = false}) async {
     if (!isLoggedIn) await login();
@@ -156,17 +235,19 @@ class ZyxelVmg3625Driver extends RouterDriver {
     try {
       res = await _dio.get<String>(endpoints.dal(oid));
     } on DioException catch (e) {
-      throw RouterException(RouterErrorCode.unreachable, e.message);
+      throw _netError(e);
     }
     if (_isSessionLost(res)) {
+      _log('oid=$oid → session lost (HTTP ${res.statusCode}), logging in again');
       if (retried) throw const RouterException(RouterErrorCode.sessionExpired);
       _sessionKey = null;
       await login();
       return _dalGet(oid, retried: true);
     }
-    final body = _crypto?.decrypt(_decodeJson(res.data)) ?? _decodeJson(res.data);
+    final body = _decodeBody(res);
     if (body is! Map || body['result'] != 'ZCFG_SUCCESS') {
-      throw RouterException(RouterErrorCode.notSupported, 'oid=$oid → ${_truncate(res.data)}');
+      _log('oid=$oid → HTTP ${res.statusCode}, not usable: ${_preview(body)}');
+      throw RouterException(RouterErrorCode.notSupported, 'oid=$oid → ${_preview(body)}');
     }
     final obj = body['Object'];
     if (obj is List) {
@@ -188,7 +269,7 @@ class ZyxelVmg3625Driver extends RouterDriver {
           ? await _dio.post<String>(endpoints.dal(oid), data: body, options: opts)
           : await _dio.put<String>(endpoints.dal(oid), data: body, options: opts);
     } on DioException catch (e) {
-      throw RouterException(RouterErrorCode.unreachable, e.message);
+      throw _netError(e);
     }
     if (_isSessionLost(res)) {
       if (retried) throw const RouterException(RouterErrorCode.sessionExpired);
@@ -196,9 +277,11 @@ class ZyxelVmg3625Driver extends RouterDriver {
       await login();
       return _dalWrite(oid, data, create: create, retried: true);
     }
-    final decoded = _crypto?.decrypt(_decodeJson(res.data)) ?? _decodeJson(res.data);
+    final decoded = _decodeBody(res);
+    _log('${create ? 'POST' : 'PUT'} ${endpoints.dal(oid)} → HTTP ${res.statusCode}, '
+        'result="${decoded is Map ? decoded['result'] : '?'}"');
     if (decoded is! Map || decoded['result'] != 'ZCFG_SUCCESS') {
-      throw RouterException(RouterErrorCode.unexpectedResponse, 'oid=$oid → ${_truncate(res.data)}');
+      throw RouterException(RouterErrorCode.unexpectedResponse, 'oid=$oid → ${_preview(decoded)}');
     }
   }
 
@@ -215,6 +298,11 @@ class ZyxelVmg3625Driver extends RouterDriver {
       }
     }
     throw last ?? RouterException(RouterErrorCode.notSupported, oids.join(','));
+  }
+
+  static String _preview(dynamic body) {
+    final s = body is String ? body : jsonEncode(body);
+    return s.length > 200 ? '${s.substring(0, 200)}…' : s;
   }
 
   bool _isSessionLost(Response<String> res) {
@@ -538,9 +626,6 @@ class ZyxelVmg3625Driver extends RouterDriver {
       return raw;
     }
   }
-
-  static String _truncate(String? s) =>
-      s == null ? '' : (s.length > 160 ? '${s.substring(0, 160)}…' : s);
 
   static dynamic _pick(Map<String, dynamic>? m, List<String> keys) {
     if (m == null) return null;

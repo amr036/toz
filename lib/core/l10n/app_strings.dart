@@ -188,6 +188,32 @@ class AppStrings {
     },
     'openInBrowser': {'en': 'Open in browser', 'ar': 'فتح في المتصفح'},
 
+
+    // Diagnostics
+    'diagTitle': {'en': 'Connection test', 'ar': 'اختبار الاتصال'},
+    'diagButton': {'en': 'Test connection', 'ar': 'اختبار الاتصال بالراوتر'},
+    'diag_reach': {'en': 'Reach router', 'ar': 'الوصول إلى الراوتر'},
+    'diag_login': {'en': 'Log in', 'ar': 'تسجيل الدخول'},
+    'diag_status': {'en': 'Router status', 'ar': 'حالة الراوتر'},
+    'diag_traffic': {'en': 'Traffic counters (usage)', 'ar': 'عدادات الاستهلاك'},
+    'diag_devices': {'en': 'Connected devices', 'ar': 'الأجهزة المتصلة'},
+    'diag_wifi': {'en': 'Wi-Fi settings', 'ar': 'إعدادات الواي فاي'},
+    'diag_dns': {'en': 'DNS', 'ar': 'خوادم DNS'},
+    'diag_speed': {'en': 'Speed limit (QoS)', 'ar': 'تحديد السرعة (QoS)'},
+    'diagAllOk': {'en': 'Everything works with your router.', 'ar': 'كل شيء يعمل مع الراوتر الخاص بك.'},
+    'diagSomeFailed': {
+      'en': 'Some steps failed. Tap "Copy report" and send it to the developer so the endpoints can be adjusted for your firmware.',
+      'ar': 'بعض الخطوات فشلت. اضغط "نسخ التقرير" وأرسله للمطوّر لضبط التطبيق على إصدار الراوتر عندك.',
+    },
+    'diagDemoWarning': {
+      'en': 'Demo mode is ON — this tests the simulated router, not yours. Turn demo mode off on the setup screen.',
+      'ar': 'وضع التجربة مفعّل — هذا يختبر راوتر افتراضي وليس الراوتر الخاص بك. أوقف وضع التجربة من شاشة الإعداد.',
+    },
+    'diagRunAgain': {'en': 'Run again', 'ar': 'إعادة الاختبار'},
+    'diagCopy': {'en': 'Copy report', 'ar': 'نسخ التقرير'},
+    'diagCopied': {'en': 'Report copied', 'ar': 'تم نسخ التقرير'},
+    'diagDetails': {'en': 'Technical details', 'ar': 'تفاصيل تقنية'},
+
     // Misc
     'language': {'en': 'العربية', 'ar': 'English'},
   };

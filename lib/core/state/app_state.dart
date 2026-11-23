@@ -276,8 +276,26 @@ class LiveController extends Notifier<LiveState> {
   }
 
   Future<void> _poll(RouterDriver driver, bool withStatus) async {
-    final status = withStatus ? await driver.getRouterStatus() : null;
-    final counters = await driver.getTrafficCounters();
+    // Status and counters are fetched independently: a firmware that names
+    // one endpoint differently must not blank the whole dashboard.
+    Object? statusError;
+    if (withStatus || state.status == null) {
+      try {
+        final status = await driver.getRouterStatus();
+        if (ref.mounted) state = state.copyWith(status: status);
+      } on RouterException catch (e) {
+        if (e.code == RouterErrorCode.sessionExpired || e.code == RouterErrorCode.unreachable) rethrow;
+        statusError = e;
+      }
+    }
+    final TrafficCounters counters;
+    try {
+      counters = await driver.getTrafficCounters();
+    } on RouterException catch (e) {
+      if (e.code == RouterErrorCode.sessionExpired || e.code == RouterErrorCode.unreachable) rethrow;
+      if (ref.mounted) state = state.copyWith(error: e, loading: false, updatedAt: DateTime.now());
+      return;
+    }
     if (!ref.mounted) return;
 
     var down = state.downBps;
@@ -299,14 +317,14 @@ class LiveController extends Notifier<LiveState> {
     }
 
     state = state.copyWith(
-      status: status,
       counters: counters,
       downBps: down,
       upBps: up,
       downHistory: prev == null ? state.downHistory : push(state.downHistory, down),
       upHistory: prev == null ? state.upHistory : push(state.upHistory, up),
       updatedAt: DateTime.now(),
-      clearError: true,
+      error: statusError,
+      clearError: statusError == null,
       loading: false,
     );
     ref.read(usageControllerProvider.notifier).ingest(counters);

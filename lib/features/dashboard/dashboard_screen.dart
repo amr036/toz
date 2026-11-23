@@ -10,6 +10,7 @@ import '../../core/utils/formatters.dart';
 import '../../core/widgets/app_top_bar.dart';
 import '../../core/widgets/common.dart';
 import '../admin/router_admin_screen.dart';
+import '../diagnostics/diagnostics_screen.dart';
 import '../shell/home_shell.dart';
 import '../usage/presentation/usage_controller.dart';
 
@@ -31,7 +32,21 @@ class DashboardScreen extends ConsumerWidget {
                 message: errorText(context, live.error),
                 onRetry: () => ref.read(liveProvider.notifier).refresh(forceStatus: true),
               ),
-              const SizedBox(height: 12),
+              Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.network_check),
+                  label: Text(context.tr('diagButton')),
+                  onPressed: () {
+                    final creds = ref.read(sessionProvider).driver?.credentials;
+                    if (creds == null) return;
+                    Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => DiagnosticsScreen(credentials: creds),
+                    ));
+                  },
+                ),
+              ),
+              const SizedBox(height: 4),
             ],
             const _StatusHeader(),
             const SizedBox(height: 12),

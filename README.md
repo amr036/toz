@@ -67,7 +67,7 @@ Requirements: Flutter **stable 3.47 or newer** (the project uses the `material_u
 
 ```bash
 flutter pub get
-flutter test                    # 22 unit tests (usage math, reboot/wrap handling, alerts, mock driver)
+flutter test                    # 44 tests (usage math, alerts, mock driver, ZYXEL driver vs. fake router, diagnostics)
 ```
 
 ### 1. Cloud IDE / web preview (demo mode)
@@ -91,7 +91,8 @@ The demo login is `admin` / `demo`.
    ```
    You can also run normally and turn off **Demo mode** on the setup screen (⚙ in the app bar).
 4. Pick **ZYXEL VMG3625-T50B**, enter `192.168.1.1` and the admin username and password from the sticker on the router (often `admin` plus a unique password). Then tap **Connect**.
-5. Build an APK to install: `flutter build apk --release --dart-define=DEMO_MODE=false`. The file is at `build/app/outputs/flutter-apk/app-release.apk`.
+5. If it doesn't connect, tap **Test connection** on the same screen (see below).
+6. Build an APK to install: `flutter build apk --release --dart-define=DEMO_MODE=false`. The file is at `build/app/outputs/flutter-apk/app-release.apk`.
 
 Android notes:
 * `AndroidManifest.xml` declares `INTERNET` and `POST_NOTIFICATIONS`. On Android 13+ the app asks for notification permission after the first connection.
@@ -130,6 +131,14 @@ Firmware builds name a few objects differently. All names live in `lib/drivers/z
    If your firmware is encrypted, responses look like `{"content":"…","iv":"…"}`. In that case, read the decoded objects from the **Console**: the page's JS keeps them in variables. You can also set a breakpoint in `util.js` after `AesDecrypt`.
 6. When saving settings (Wi-Fi, QoS shaper, DNS), check the request method and **Payload**. The driver uses `PUT` to update existing rows and `POST` to create new ones.
    If yours differs, adjust `_dalWrite` or the field names in `zyxel_vmg3625_driver.dart`.
+
+### Easiest: the in-app connection test
+
+On the setup screen (⚙ in the app bar), turn **Demo mode** off, fill in IP / username / password, and tap **Test connection**.
+It checks, in order: reaching the router → login (and whether the firmware uses the encrypted API or HTTPS) → status → traffic counters → devices → Wi-Fi → DNS → speed limit.
+Each step shows ✓ / ⚠ / ✗ with the router's actual answer. **Copy report** puts a text report on the clipboard (it never contains the password); send it to the developer to adjust `zyxel_endpoints.dart` for your firmware.
+
+The same protocol is covered by `test/zyxel_driver_test.dart`, which runs the driver against an in-process fake ZYXEL server (`test/fake_zyxel_server.dart`) in both encrypted and plain-JSON modes.
 
 ### Step 2: Quick check from a terminal (unencrypted firmware only)
 
