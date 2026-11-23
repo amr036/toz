@@ -9,20 +9,20 @@ import 'http_adapter_stub.dart' if (dart.library.io) 'http_adapter_io.dart';
 import 'zyxel_crypto.dart';
 import 'zyxel_endpoints.dart';
 
-/// Driver for the ZYXEL VMG3625-T50B (and close siblings: VMG8825-T50,
-/// VMG3925-B10C, EX3301 which share the same "DAL" JSON web API).
+/// Driver for the ZYXEL VMG3625-T50B and its "DAL API" siblings
+/// (VMG8623-T50B, VMG8825-T50, EX3301 …).
 ///
-/// Session flow (as used by the router's own web UI):
-///  * `POST /UserLogin` with `Input_Account` + base64(`Input_Passwd`)
-///    → `{"result":"ZCFG_SUCCESS","sessionkey":"..."}` + `Session` cookie.
-///  * Every following call sends the cookie and `CSRFToken: <sessionkey>`.
-///  * Data lives behind `GET/PUT/POST /cgi-bin/DAL?oid=<object>` returning
-///    `{"result":"ZCFG_SUCCESS","Object":[ ... ]}`.
-///
-/// Field names vary slightly between firmware builds, so parsing is lenient
-/// (several candidate keys per value) and every endpoint is configurable via
-/// [ZyxelEndpoints]. Anything the firmware doesn't support surfaces as a
-/// [RouterException] with [RouterErrorCode.notSupported] instead of a crash.
+/// Protocol (V5.50 firmware, confirmed on a real VMG3625-T50B):
+///  * Web UI is usually HTTPS-only with a self-signed certificate. The driver
+///    tries the configured scheme first and falls back to the other one.
+///  * `GET /getRSAPublickKey` → RSA key; login + all payloads are AES-256-CBC
+///    encrypted (see [ZyxelCrypto]). Older builds use plain JSON.
+///  * `POST /UserLogin` → `{"result":"ZCFG_SUCCESS","sessionkey":…}` + cookie.
+///  * Reads: `GET /cgi-bin/DAL?oid=…` (cookie only).
+///  * Writes (PUT/POST/DELETE, Reboot, Logout) need `CSRFToken: <sessionkey>`
+///    and every successful write returns a NEW sessionkey (CSRF rotation).
+///    Using a stale one gives HTTP 403.
+///  * One admin session per user ("Duplicated login"); idle timeout ≈ 5 min.
 class ZyxelVmg3625Driver extends RouterDriver {
   ZyxelVmg3625Driver(
     super.credentials, {
@@ -30,34 +30,33 @@ class ZyxelVmg3625Driver extends RouterDriver {
     this.trace,
     Dio? dio,
   }) : _dio = dio ?? _buildDio(credentials) {
-    _setup();
+    // Self-signed certificates are accepted ONLY for the gateway host.
+    configureRouterHttp(_dio, _cookieJar, credentials.gatewayIp.split(':').first);
   }
 
   final ZyxelEndpoints endpoints;
 
-  /// Optional step-by-step log (used by the connection test screen).
-  /// Never receives the password.
-  final void Function(String line)? trace;
+  /// Optional step-by-step log (connection test screen). Never receives
+  /// passwords or session keys.
+  void Function(String line)? trace;
 
   final Dio _dio;
   final CookieJar _cookieJar = CookieJar();
 
   String? _sessionKey;
   ZyxelCrypto? _crypto;
-  bool _encryptionProbed = false;
+  bool _probed = false;
   Map<String, dynamic>? _lastWlanObject;
-  int _wlanIndex = 1;
 
-  /// True once we detected the router forces HTTPS.
   bool get usingHttps => _dio.options.baseUrl.startsWith('https');
   bool get encrypted => _crypto != null;
 
   static Dio _buildDio(RouterCredentials c) => Dio(BaseOptions(
         baseUrl: c.baseUrl,
         connectTimeout: const Duration(seconds: 6),
-        receiveTimeout: const Duration(seconds: 12),
+        receiveTimeout: const Duration(seconds: 15),
         sendTimeout: const Duration(seconds: 8),
-        responseType: ResponseType.plain, // we decode ourselves (encrypted or not)
+        responseType: ResponseType.plain, // decoded (and decrypted) by us
         validateStatus: (_) => true,
         followRedirects: false,
         headers: {
@@ -65,12 +64,6 @@ class ZyxelVmg3625Driver extends RouterDriver {
           'X-Requested-With': 'XMLHttpRequest',
         },
       ));
-
-  void _setup() {
-    // Routers use self-signed certificates; they are accepted ONLY for the
-    // configured gateway host (see http_adapter_io.dart).
-    configureRouterHttp(_dio, _cookieJar, credentials.gatewayIp.split(':').first);
-  }
 
   void _log(String line) {
     trace?.call(line);
@@ -87,69 +80,94 @@ class ZyxelVmg3625Driver extends RouterDriver {
   @override
   bool get isLoggedIn => _sessionKey != null;
 
+  @override
+  Uri get adminPageUri => Uri.parse(_dio.options.baseUrl);
+
   // ---------------------------------------------------------------------------
-  // Session
+  // Transport
   // ---------------------------------------------------------------------------
 
   RouterException _netError(DioException e) {
+    final cause = e.error ?? e.message ?? e.type.name;
     final msg = switch (e.type) {
       DioExceptionType.connectionTimeout => 'Connection timed out (${_dio.options.baseUrl})',
       DioExceptionType.receiveTimeout => 'Router did not answer in time',
-      DioExceptionType.connectionError => 'Cannot connect to ${_dio.options.baseUrl}: ${e.error ?? e.message}',
-      _ => '${e.type.name}: ${e.error ?? e.message}',
+      _ => 'Cannot talk to ${_dio.options.baseUrl}: $cause',
     };
     _log('NETWORK ERROR: $msg');
     return RouterException(RouterErrorCode.unreachable, msg);
   }
 
-  /// Detects HTTP→HTTPS redirect and the encrypted (RSA/AES) web API.
-  Future<void> _probe() async {
-    if (_encryptionProbed) return;
-    try {
-      final root = await _dio.get<String>('/');
-      _log('GET / → HTTP ${root.statusCode}');
-      final location = root.headers.value('location') ?? '';
-      if ((root.statusCode == 301 || root.statusCode == 302 || root.statusCode == 307) &&
-          location.startsWith('https://') &&
-          !usingHttps) {
-        _dio.options.baseUrl = _dio.options.baseUrl.replaceFirst('http://', 'https://');
-        _log('Router redirects to HTTPS → switching to ${_dio.options.baseUrl}');
-      }
+  String _otherScheme(String base) => base.startsWith('https://')
+      ? base.replaceFirst('https://', 'http://')
+      : base.replaceFirst('http://', 'https://');
 
-      final res = await _dio.get<String>(endpoints.rsaPublicKey);
-      _log('GET ${endpoints.rsaPublicKey} → HTTP ${res.statusCode}');
-      if (res.statusCode == 200) {
-        final body = _decodeJson(res.data);
-        final pem = body is Map ? body['RSAPublicKey'] : null;
-        if (pem is String && pem.isNotEmpty) {
-          _crypto = ZyxelCrypto(pem);
-          _log('Encrypted web API detected (RSA + AES-256-CBC)');
-        } else {
-          _log('No RSA key in response → plain JSON API');
+  /// Finds a working scheme (HTTP or HTTPS) and whether payloads are encrypted.
+  Future<void> _probe() async {
+    if (_probed) return;
+    DioException? firstError;
+    Response<String>? root;
+    for (final base in [_dio.options.baseUrl, _otherScheme(_dio.options.baseUrl)]) {
+      _dio.options.baseUrl = base;
+      try {
+        root = await _dio.get<String>('/');
+        _log('GET $base/ → HTTP ${root.statusCode}');
+        final loc = root.headers.value('location') ?? '';
+        if ((root.statusCode ?? 0) ~/ 100 == 3 && loc.startsWith('https://') && !usingHttps) {
+          _log('Router redirects to HTTPS');
+          continue;
         }
-      } else {
-        _log('No RSA endpoint → plain JSON API');
+        break;
+      } on DioException catch (e) {
+        _log('GET $base/ failed: ${e.error ?? e.type.name}');
+        firstError ??= e;
+        root = null;
       }
-      _encryptionProbed = true;
+    }
+    if (root == null) throw _netError(firstError!);
+    _log('Using ${_dio.options.baseUrl}');
+
+    try {
+      final res = await _dio.get<String>(endpoints.rsaPublicKey);
+      final body = _decodeJson(res.data);
+      final pem = body is Map ? body['RSAPublicKey'] : null;
+      if (res.statusCode == 200 && pem is String && pem.isNotEmpty) {
+        _crypto = ZyxelCrypto(pem);
+        _log('Encrypted web API (RSA + AES-256-CBC)');
+      } else {
+        _log('Plain JSON web API (no RSA key, HTTP ${res.statusCode})');
+      }
     } on DioException catch (e) {
       throw _netError(e);
-    } on RouterException {
-      rethrow;
     } catch (e) {
-      _encryptionProbed = true;
-      _log('RSA key could not be parsed ($e) → trying plain JSON');
+      _log('RSA key could not be used ($e) → plain JSON');
     }
+    _probed = true;
   }
 
   dynamic _decodeBody(Response<String> res) {
     final raw = _decodeJson(res.data);
+    dynamic body;
     try {
-      return _crypto?.decrypt(raw) ?? raw;
+      body = _crypto?.decrypt(raw) ?? raw;
     } catch (e) {
       _log('Could not decrypt response: $e');
-      return raw;
+      body = raw;
     }
+    // CSRF rotation: any response may carry the next sessionkey.
+    if (body is Map) {
+      final next = body['sessionkey'] ?? body['sessionKey'];
+      if (next != null && '$next'.isNotEmpty && _sessionKey != null && '$next' != _sessionKey) {
+        _sessionKey = '$next';
+        _dio.options.headers['CSRFToken'] = _sessionKey;
+      }
+    }
+    return body;
   }
+
+  // ---------------------------------------------------------------------------
+  // Session
+  // ---------------------------------------------------------------------------
 
   @override
   Future<void> login() async {
@@ -173,29 +191,38 @@ class ZyxelVmg3625Driver extends RouterDriver {
       throw _netError(e);
     }
 
-    final body = _decodeBody(res);
+    final raw = _decodeJson(res.data);
+    dynamic body;
+    try {
+      body = _crypto?.decrypt(raw) ?? raw;
+    } catch (_) {
+      body = raw;
+    }
     final result = body is Map ? '${body['result'] ?? ''}' : '';
+    final reply = body is Map ? '${body['replyMsg'] ?? body['ReplyMsg'] ?? body['message'] ?? ''}' : '';
     _log('POST ${endpoints.login} (user "${credentials.username}") → HTTP ${res.statusCode}, '
-        'result="$result"${body is Map && body['message'] != null ? ', message="${body['message']}"' : ''}');
+        'result="$result"${reply.isEmpty ? '' : ', reply="$reply"'}');
+
     if (res.statusCode == 200 && result == 'ZCFG_SUCCESS') {
       _sessionKey = '${body['sessionkey'] ?? body['sessionKey'] ?? ''}';
       _dio.options.headers['CSRFToken'] = _sessionKey;
-      _log('Logged in (session key ${_sessionKey!.isEmpty ? 'missing!' : 'received'})');
+      _log('Logged in');
       return;
     }
 
-    final detail = '$result ${body is Map ? (body['message'] ?? '') : ''}'.trim();
-    final lower = detail.toLowerCase();
-    if (lower.contains('limit') || lower.contains('already') || lower.contains('lock') || lower.contains('retry')) {
-      throw RouterException(RouterErrorCode.tooManySessions, detail);
+    final lower = '$result $reply'.toLowerCase();
+    if (lower.contains('locked')) {
+      final secs = RegExp(r'\d+').firstMatch(reply)?.group(0);
+      throw RouterException(RouterErrorCode.lockedOut, secs == null ? result : '$secs s');
     }
-    if (res.statusCode == 401 || lower.contains('invalid') || lower.contains('password') || lower.contains('incorrect')) {
-      throw RouterException(RouterErrorCode.invalidCredentials, detail);
+    if (lower.contains('duplicat') || lower.contains('already') || lower.contains('limit')) {
+      throw RouterException(RouterErrorCode.tooManySessions, result);
     }
-    throw RouterException(
-      RouterErrorCode.unexpectedResponse,
-      'HTTP ${res.statusCode}: ${_preview(body)}',
-    );
+    if (lower.contains('invalid') || lower.contains('password') || lower.contains('incorrect') ||
+        res.statusCode == 401) {
+      throw RouterException(RouterErrorCode.invalidCredentials, result);
+    }
+    throw RouterException(RouterErrorCode.unexpectedResponse, 'HTTP ${res.statusCode}: ${_preview(body)}');
   }
 
   @override
@@ -205,30 +232,36 @@ class ZyxelVmg3625Driver extends RouterDriver {
       final res = await _dio.post<String>(endpoints.logout);
       _log('POST ${endpoints.logout} → HTTP ${res.statusCode}');
     } catch (_) {
-      // Best effort — the router frees idle sessions after a few minutes anyway.
+      // Best effort — the router frees idle sessions after ~5 minutes anyway.
     }
     _sessionKey = null;
     _dio.options.headers.remove('CSRFToken');
   }
 
+  Future<void> _relogin(String why) async {
+    _log('$why → logging in again');
+    _sessionKey = null;
+    _dio.options.headers.remove('CSRFToken');
+    await login();
+  }
+
   // ---------------------------------------------------------------------------
-  // DAL helpers
+  // DAL
   // ---------------------------------------------------------------------------
 
-  /// Raw decoded body of `GET /cgi-bin/DAL?oid=…` (for diagnostics).
+  /// Raw decoded body of `GET /cgi-bin/DAL?oid=…`, with secrets removed
+  /// (for the connection test report).
   Future<dynamic> rawDal(String oid) async {
     if (!isLoggedIn) await login();
     try {
       final res = await _dio.get<String>(endpoints.dal(oid));
-      final body = _decodeBody(res);
-      _log('GET ${endpoints.dal(oid)} → HTTP ${res.statusCode}, result="${body is Map ? body['result'] : '?'}"');
-      return body;
+      return redactSecrets(_decodeBody(res));
     } on DioException catch (e) {
       throw _netError(e);
     }
   }
 
-  /// GET /cgi-bin/DAL?oid=… and return the `Object` list.
+  /// GET /cgi-bin/DAL?oid=… → the `Object` list.
   Future<List<Map<String, dynamic>>> _dalGet(String oid, {bool retried = false}) async {
     if (!isLoggedIn) await login();
     final Response<String> res;
@@ -237,55 +270,60 @@ class ZyxelVmg3625Driver extends RouterDriver {
     } on DioException catch (e) {
       throw _netError(e);
     }
-    if (_isSessionLost(res)) {
-      _log('oid=$oid → session lost (HTTP ${res.statusCode}), logging in again');
+    final body = _decodeBody(res);
+    if (_sessionLost(res, body)) {
       if (retried) throw const RouterException(RouterErrorCode.sessionExpired);
-      _sessionKey = null;
-      await login();
+      await _relogin('GET oid=$oid: session expired (HTTP ${res.statusCode})');
       return _dalGet(oid, retried: true);
     }
-    final body = _decodeBody(res);
     if (body is! Map || body['result'] != 'ZCFG_SUCCESS') {
-      _log('oid=$oid → HTTP ${res.statusCode}, not usable: ${_preview(body)}');
+      _log('GET oid=$oid → HTTP ${res.statusCode}: ${_preview(body)}');
       throw RouterException(RouterErrorCode.notSupported, 'oid=$oid → ${_preview(body)}');
     }
     final obj = body['Object'];
-    if (obj is List) {
-      return obj.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList();
-    }
-    if (obj is Map) return [Map<String, dynamic>.from(obj)];
-    return const [];
+    final out = obj is List
+        ? obj.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList()
+        : obj is Map
+            ? [Map<String, dynamic>.from(obj)]
+            : <Map<String, dynamic>>[];
+    _log('GET oid=$oid → OK (${out.length} object${out.length == 1 ? '' : 's'})');
+    return out;
   }
 
-  /// PUT (update) or POST (create) a DAL object.
-  Future<void> _dalWrite(String oid, Map<String, dynamic> data,
-      {bool create = false, bool retried = false}) async {
+  /// Any CSRF-protected write. Retries once after re-login on 401/403/504
+  /// (stale sessionkey). Returns the decoded body.
+  Future<dynamic> _write(String method, String path, {Map<String, dynamic>? data, bool retried = false}) async {
     if (!isLoggedIn) await login();
     final Response<String> res;
     try {
-      final body = jsonEncode(_crypto?.encrypt(data) ?? data);
-      final opts = Options(contentType: 'application/json');
-      res = create
-          ? await _dio.post<String>(endpoints.dal(oid), data: body, options: opts)
-          : await _dio.put<String>(endpoints.dal(oid), data: body, options: opts);
+      res = await _dio.request<String>(
+        path,
+        data: data == null ? null : jsonEncode(_crypto?.encrypt(data) ?? data),
+        options: Options(method: method, contentType: 'application/json'),
+      );
     } on DioException catch (e) {
       throw _netError(e);
     }
-    if (_isSessionLost(res)) {
-      if (retried) throw const RouterException(RouterErrorCode.sessionExpired);
-      _sessionKey = null;
-      await login();
-      return _dalWrite(oid, data, create: create, retried: true);
+    final body = _decodeBody(res);
+    final status = res.statusCode ?? 0;
+    _log('$method $path → HTTP $status${body is Map ? ', result="${body['result']}"' : ''}');
+    if ((status == 401 || status == 403 || status == 504) && !retried) {
+      await _relogin('$method $path rejected (HTTP $status, stale session)');
+      return _write(method, path, data: data, retried: true);
     }
-    final decoded = _decodeBody(res);
-    _log('${create ? 'POST' : 'PUT'} ${endpoints.dal(oid)} → HTTP ${res.statusCode}, '
-        'result="${decoded is Map ? decoded['result'] : '?'}"');
-    if (decoded is! Map || decoded['result'] != 'ZCFG_SUCCESS') {
-      throw RouterException(RouterErrorCode.unexpectedResponse, 'oid=$oid → ${_preview(decoded)}');
+    if (status == 401 || status == 403) {
+      throw RouterException(RouterErrorCode.sessionExpired, 'HTTP $status');
+    }
+    return body;
+  }
+
+  Future<void> _dalWrite(String oid, Map<String, dynamic> data, {bool create = false}) async {
+    final body = await _write(create ? 'POST' : 'PUT', endpoints.dal(oid), data: data);
+    if (body is! Map || body['result'] != 'ZCFG_SUCCESS') {
+      throw RouterException(RouterErrorCode.unexpectedResponse, 'oid=$oid → ${_preview(body)}');
     }
   }
 
-  /// Tries each oid in order and returns the first one that works.
   Future<List<Map<String, dynamic>>> _dalGetFirst(List<String> oids) async {
     RouterException? last;
     for (final oid in oids) {
@@ -300,16 +338,11 @@ class ZyxelVmg3625Driver extends RouterDriver {
     throw last ?? RouterException(RouterErrorCode.notSupported, oids.join(','));
   }
 
-  static String _preview(dynamic body) {
-    final s = body is String ? body : jsonEncode(body);
-    return s.length > 200 ? '${s.substring(0, 200)}…' : s;
-  }
-
-  bool _isSessionLost(Response<String> res) {
-    if (res.statusCode == 401 || res.statusCode == 403) return true;
-    if (res.statusCode == 302 || res.statusCode == 301) return true; // redirected to login
-    final data = res.data ?? '';
-    return data.contains('Invalid Session') || data.contains('login.html');
+  bool _sessionLost(Response<String> res, dynamic body) {
+    final s = res.statusCode ?? 0;
+    if (s == 401 || s == 403 || s == 301 || s == 302) return true;
+    final r = body is Map ? '${body['result']}'.toLowerCase() : '${res.data}'.toLowerCase();
+    return r.contains('invalid session') || r.contains('login.html');
   }
 
   // ---------------------------------------------------------------------------
@@ -318,54 +351,65 @@ class ZyxelVmg3625Driver extends RouterDriver {
 
   @override
   Future<RouterStatus> getRouterStatus() async {
-    final objs = await _dalGetFirst(endpoints.statusOids);
-    final root = objs.first;
-
+    final root = (await _dalGetFirst(endpoints.statusOids)).first;
     final deviceInfo = _asMap(root['DeviceInfo']) ?? root;
     final dsl = _firstMap(root['DslChannelInfo']) ?? _firstMap(root['DslInfo']);
     final wan = _pickWan(root['WanLanInfo'] ?? root['WanInfo']);
 
     final wanStatus = '${wan?['Status'] ?? ''}'.toLowerCase();
-    final uptimeSecs = _int(_pick(deviceInfo, ['UpTime', 'Uptime', 'X_ZYXEL_UpTime']));
-    final dslUp = _int(_pick(dsl, ['UpstreamCurrRate', 'UpstreamRate']));
-    final dslDown = _int(_pick(dsl, ['DownstreamCurrRate', 'DownstreamRate']));
-    final encapsulation = _pick(dsl, ['LinkEncapsulationUsed', 'StandardUsed']);
-    final wanIp = _pick(wan, ['IPAddress', 'IPv4Address', 'ExternalIPAddress']);
+    final uptimeSecs = _int(_pick(deviceInfo, const ['UpTime', 'Uptime', 'X_ZYXEL_UpTime']));
+    final wanIp = _wanIp(wan);
 
     return RouterStatus(
-      connected: wanStatus == 'up' || wanStatus == 'connected' || (wanIp != null && '$wanIp'.isNotEmpty),
-      model: '${_pick(deviceInfo, ['ModelName', 'ProductClass']) ?? modelName}',
+      connected: wanStatus == 'up' || wanStatus == 'connected' || (wanIp != null && wanIp != '0.0.0.0'),
+      model: '${_pick(deviceInfo, const ['ModelName', 'ProductClass']) ?? modelName}',
       gatewayIp: credentials.gatewayIp,
-      firmwareVersion: _pick(deviceInfo, ['SoftwareVersion', 'FirmwareVersion'])?.toString(),
-      wanIp: wanIp?.toString(),
+      firmwareVersion: _pick(deviceInfo, const ['SoftwareVersion', 'FirmwareVersion'])?.toString(),
+      wanIp: wanIp,
       wanType: [
-        _pick(dsl, ['StandardUsed'])?.toString(),
-        encapsulation?.toString(),
-        _pick(wan, ['Encapsulation', 'Type'])?.toString(),
+        _pick(dsl, const ['StandardUsed'])?.toString(),
+        _pick(dsl, const ['LinkEncapsulationUsed'])?.toString(),
+        _pick(wan, const ['Encapsulation', 'LinkType'])?.toString(),
+        root['WanType']?.toString(),
       ].whereType<String>().where((s) => s.isNotEmpty).toSet().join(' / '),
-      lineStatus: _pick(dsl, ['Status'])?.toString() ?? _pick(wan, ['Status'])?.toString(),
-      dslDownstreamKbps: dslDown,
-      dslUpstreamKbps: dslUp,
+      lineStatus: _pick(dsl, const ['Status'])?.toString() ?? _pick(wan, const ['Status'])?.toString(),
+      dslDownstreamKbps: _int(_pick(dsl, const ['DownstreamCurrRate', 'DownstreamRate'])),
+      dslUpstreamKbps: _int(_pick(dsl, const ['UpstreamCurrRate', 'UpstreamRate'])),
       uptime: uptimeSecs == null ? null : Duration(seconds: uptimeSecs),
     );
+  }
+
+  static String? _wanIp(Map<String, dynamic>? wan) {
+    if (wan == null) return null;
+    final v4 = wan['IPv4Address'];
+    if (v4 is List && v4.isNotEmpty && v4.first is Map) {
+      final ip = (v4.first as Map)['IPAddress'];
+      if (ip != null && '$ip'.isNotEmpty) return '$ip';
+    }
+    if (v4 is String && v4.isNotEmpty) return v4;
+    final ip = _pick(wan, const ['IPAddress', 'ExternalIPAddress']);
+    return ip == null || '$ip'.isEmpty ? null : '$ip';
   }
 
   @override
   Future<TrafficCounters> getTrafficCounters() async {
     final objs = await _dalGetFirst(endpoints.trafficOids);
+    const rxKeys = ['BytesReceived', 'X_ZYXEL_BytesReceived', 'RxBytes'];
+    const txKeys = ['BytesSent', 'X_ZYXEL_BytesSent', 'TxBytes'];
     final candidates = <({Map<String, dynamic> stats, int score})>[];
 
     void walk(dynamic node, String path) {
       if (node is Map) {
         final m = Map<String, dynamic>.from(node);
-        final rx = _pick(m, const ['BytesReceived', 'RxBytes', 'X_ZYXEL_BytesReceived']);
-        final tx = _pick(m, const ['BytesSent', 'TxBytes', 'X_ZYXEL_BytesSent']);
-        if (rx != null && tx != null) {
-          final label = '$path ${m['Name'] ?? ''} ${m['Alias'] ?? ''} ${m['X_ZYXEL_IfName'] ?? ''}'
+        if (_pick(m, rxKeys) != null && _pick(m, txKeys) != null) {
+          final label = '$path ${m['Name'] ?? ''} ${m['Alias'] ?? ''} ${m['X_ZYXEL_IfName'] ?? ''} '
+                  '${m['X_ZYXEL_SrvName'] ?? ''} ${m['LowerLayers'] ?? ''}'
               .toLowerCase();
           var score = 0;
-          if (RegExp(r'wan|ppp|ptm|atm|dsl|internet|eth4|nas').hasMatch(label)) score += 10;
-          if (RegExp(r'lan|wl|wifi|ssid|br0|iptv|voip|mgmt').hasMatch(label)) score -= 10;
+          if (RegExp(r'ppp|wan|ptm|atm|dsl|internet|nas').hasMatch(label)) score += 10;
+          if (RegExp(r'lan|wl|wifi|ssid|br0|iptv|voip|mgmt|ethernet\.interface\.[1-4]\b').hasMatch(label)) {
+            score -= 10;
+          }
           candidates.add((stats: m, score: score));
         }
         m.forEach((k, v) => walk(v, '$path/$k'));
@@ -380,44 +424,53 @@ class ZyxelVmg3625Driver extends RouterDriver {
       walk(o, '');
     }
     if (candidates.isEmpty) {
-      throw const RouterException(
-        RouterErrorCode.notSupported,
-        'No BytesReceived/BytesSent found. Check ZyxelEndpoints.trafficOids.',
-      );
+      throw const RouterException(RouterErrorCode.notSupported, 'no BytesReceived/BytesSent in Traffic_Status');
     }
     candidates.sort((a, b) {
       final s = b.score.compareTo(a.score);
       if (s != 0) return s;
-      // Tie-break: the busiest interface is almost always the WAN.
-      final ar = _int(_pick(a.stats, const ['BytesReceived', 'RxBytes'])) ?? 0;
-      final br = _int(_pick(b.stats, const ['BytesReceived', 'RxBytes'])) ?? 0;
-      return br.compareTo(ar);
+      return (_int(_pick(b.stats, rxKeys)) ?? 0).compareTo(_int(_pick(a.stats, rxKeys)) ?? 0);
     });
     final best = candidates.first.stats;
     return TrafficCounters(
-      rxBytes: _int(_pick(best, const ['BytesReceived', 'RxBytes', 'X_ZYXEL_BytesReceived'])) ?? 0,
-      txBytes: _int(_pick(best, const ['BytesSent', 'TxBytes', 'X_ZYXEL_BytesSent'])) ?? 0,
+      rxBytes: _int(_pick(best, rxKeys)) ?? 0,
+      txBytes: _int(_pick(best, txKeys)) ?? 0,
       timestamp: DateTime.now(),
     );
   }
 
-  Map<String, dynamic>? _pickShaper(List<Map<String, dynamic>> rows) {
-    if (rows.isEmpty) return null;
-    for (final r in rows) {
-      final iface = '${r['Interface'] ?? r['IfName'] ?? ''}'.toLowerCase();
-      if (endpoints.shaperInterfaceHints.any(iface.contains)) return r;
+  // ---- Speed limit ----------------------------------------------------------
+  //
+  // VMG3625-T50B QoS → General has "LAN Managed Downstream Bandwidth": a cap
+  // on the total download rate delivered to LAN + Wi-Fi clients. That is the
+  // whole-network "Wi-Fi speed limit". (QoS → Shaper only limits WAN upload
+  // and rejects non-WAN interfaces, as seen on real hardware.)
+
+  static String? _downKey(Map<String, dynamic> qos) {
+    for (final k in qos.keys) {
+      final l = k.toLowerCase();
+      if (l.contains('down') && !l.contains('priority') && !l.contains('enable') && _int(qos[k]) != null) {
+        return k;
+      }
     }
-    return rows.first;
+    return null;
   }
+
+  static String _enableKey(Map<String, dynamic> qos) =>
+      const ['Enable', 'QosEnable', 'X_ZYXEL_Enable'].firstWhere(qos.containsKey, orElse: () => 'Enable');
 
   @override
   Future<SpeedLimit> getWifiSpeedLimit() async {
     try {
-      final row = _pickShaper(await _dalGet(endpoints.qosShaperOid));
-      if (row == null || row['Enable'] != true) return const SpeedLimit.unlimited();
-      final kbps = _int(_pick(row, const ['ShapingRate', 'Rate', 'RateLimit']));
-      if (kbps == null || kbps <= 0) return const SpeedLimit.unlimited();
-      return SpeedLimit.mbps(kbps / 1000);
+      final qos = (await _dalGet(endpoints.qosOid)).firstOrNull;
+      if (qos == null) return const SpeedLimit.unlimited();
+      final key = _downKey(qos);
+      final enabled = qos[_enableKey(qos)];
+      final kbps = key == null ? null : _int(qos[key]);
+      if ((enabled == true || enabled == 1 || enabled == '1') && kbps != null && kbps > 0) {
+        return SpeedLimit.mbps(kbps / 1000);
+      }
+      return const SpeedLimit.unlimited();
     } on RouterException catch (e) {
       if (e.code == RouterErrorCode.notSupported) return const SpeedLimit.unlimited();
       rethrow;
@@ -427,46 +480,32 @@ class ZyxelVmg3625Driver extends RouterDriver {
   @override
   Future<SpeedLimitResult> setWifiSpeedLimit(SpeedLimit limit) async {
     try {
-      // QoS must be globally enabled for the shaper to take effect.
-      if (!limit.isUnlimited) {
-        try {
-          await _dalWrite(endpoints.qosOid, {'Enable': true});
-        } on RouterException catch (e) {
-          debugPrint('[Zyxel] enabling global QoS failed (may already be on): $e');
-        }
-      }
-
-      final rows = await _dalGet(endpoints.qosShaperOid);
-      final existing = _pickShaper(rows);
-      if (existing == null && limit.isUnlimited) {
+      final qos = (await _dalGet(endpoints.qosOid)).firstOrNull;
+      final key = qos == null ? null : _downKey(qos);
+      if (qos == null || key == null) {
         return SpeedLimitResult(
-          success: true,
-          method: SpeedLimitMethod.qosShaper,
+          success: false,
+          method: SpeedLimitMethod.unsupported,
           limit: limit,
-          message: 'No shaper configured — already unlimited',
+          message: 'QoS page has no downstream bandwidth field '
+              '(fields: ${qos?.keys.join(', ') ?? 'none'}). Send the connection-test report to the developer.',
         );
       }
-      if (existing == null) {
-        // Firmware lists no shaper rows: create one. The Interface value must
-        // match what the GUI sends — verify in DevTools (QoS → Shaper → Add).
-        await _dalWrite(
-          endpoints.qosShaperOid,
-          {'Enable': true, 'Interface': 'WAN', 'ShapingRate': limit.kbps},
-          create: true,
-        );
+      final out = Map<String, dynamic>.from(qos);
+      final enableKey = _enableKey(qos);
+      final asString = qos[key] is String;
+      if (limit.isUnlimited) {
+        out[enableKey] = false;
       } else {
-        final updated = Map<String, dynamic>.from(existing)
-          ..['Enable'] = !limit.isUnlimited
-          ..['ShapingRate'] = limit.kbps ?? existing['ShapingRate'] ?? 0;
-        await _dalWrite(endpoints.qosShaperOid, updated);
+        out[enableKey] = true;
+        out[key] = asString ? '${limit.kbps}' : limit.kbps;
       }
+      await _dalWrite(endpoints.qosOid, out);
       return SpeedLimitResult(
         success: true,
         method: SpeedLimitMethod.qosShaper,
         limit: limit,
-        message: limit.isUnlimited
-            ? 'QoS shaper disabled'
-            : 'QoS shaper set to ${limit.kbps} kbps on ${existing?['Interface'] ?? 'WAN'}',
+        message: limit.isUnlimited ? 'QoS disabled (no limit)' : 'QoS $key = ${limit.kbps} kbps',
       );
     } on RouterException catch (e) {
       if (e.code == RouterErrorCode.notSupported || e.code == RouterErrorCode.unexpectedResponse) {
@@ -474,12 +513,32 @@ class ZyxelVmg3625Driver extends RouterDriver {
           success: false,
           method: SpeedLimitMethod.unsupported,
           limit: limit,
-          message: 'Firmware rejected QoS shaper request (${e.details}). '
-              'Use "Open router admin page" → QoS → Shaper, or update ZyxelEndpoints.',
+          message: 'Router rejected the QoS change: ${e.details}',
         );
       }
       rethrow;
     }
+  }
+
+  // ---- Devices ---------------------------------------------------------------
+
+  static WifiBand _band(Map<String, dynamic> h) {
+    final conn = '${_pick(h, const ['X_ZYXEL_ConnectionType', 'InterfaceType']) ?? ''}'.toLowerCase();
+    final l1 = '${h['Layer1Interface'] ?? ''}'.toLowerCase();
+    final std = '${_pick(h, const ['X_ZYXEL_OperatingStandard', 'OperatingStandard']) ?? ''}'.toLowerCase();
+    final bandStr = '${_pick(h, const ['X_ZYXEL_WiFiBand', 'WiFiBand', 'X_ZYXEL_Band']) ?? ''}'.toLowerCase();
+    if (conn.contains('ether') || l1.contains('ethernet')) return WifiBand.ethernet;
+    final isWifi = conn.contains('wi') || conn.contains('wl') || l1.contains('wifi') || std.isNotEmpty;
+    if (!isWifi) return WifiBand.unknown;
+    if (bandStr.contains('5')) return WifiBand.band5;
+    if (bandStr.contains('2.4')) return WifiBand.band24;
+    // 802.11a / ac / ax are 5 GHz standards ("ax" can be both; treat as 5).
+    if (RegExp(r'\ba\b|ac|ax').hasMatch(std.replaceAll(',', ' ').replaceAll('/', ' '))) return WifiBand.band5;
+    if (std.isNotEmpty) return WifiBand.band24;
+    // Layer1Interface "WiFi.SSID.N": 1-4 = 2.4 GHz, 5-8 = 5 GHz on T50 builds.
+    final n = int.tryParse(RegExp(r'ssid\.(\d+)').firstMatch(l1)?.group(1) ?? '');
+    if (n != null) return n >= 5 ? WifiBand.band5 : WifiBand.band24;
+    return WifiBand.unknown;
   }
 
   @override
@@ -495,76 +554,90 @@ class ZyxelVmg3625Driver extends RouterDriver {
       }
     }
     return hosts.map((h) {
-      final conn = '${_pick(h, const ['X_ZYXEL_ConnectionType', 'InterfaceType', 'Layer1Interface']) ?? ''}'
-          .toLowerCase();
-      final bandStr = '${_pick(h, const ['X_ZYXEL_WiFiBand', 'WiFiBand', 'X_ZYXEL_Band']) ?? ''}'.toLowerCase();
-      WifiBand band;
-      if (conn.contains('ether')) {
-        band = WifiBand.ethernet;
-      } else if (bandStr.contains('5') || conn.contains('5g')) {
-        band = WifiBand.band5;
-      } else if (bandStr.contains('2.4') || conn.contains('wi') || conn.contains('wl')) {
-        band = WifiBand.band24;
-      } else {
-        band = WifiBand.unknown;
-      }
-      final name = '${_pick(h, const ['HostName', 'X_ZYXEL_HostName', 'DeviceName']) ?? ''}';
+      final name = '${_pick(h, const ['curHostName', 'HostName', 'X_ZYXEL_HostName', 'DeviceName']) ?? ''}';
       final mac = '${_pick(h, const ['PhysAddress', 'MACAddress']) ?? ''}'.toUpperCase();
+      final active = _pick(h, const ['Active']);
       return ConnectedDevice(
         name: name.isEmpty ? mac : name,
         ip: '${_pick(h, const ['IPAddress', 'IPv4Address']) ?? '-'}',
         mac: mac,
-        band: band,
+        band: _band(h),
         signalDbm: _int(_pick(h, const ['X_ZYXEL_SignalStrength', 'SignalStrength', 'RSSI'])),
-        active: _pick(h, const ['Active']) != false,
+        active: !(active == false || active == 0 || active == '0' || active == 'false'),
       );
     }).toList();
   }
 
+  // ---- Wi-Fi ------------------------------------------------------------------
+
+  static const _ssidKeys = ['SSID', 'wlSsid'];
+  static const _passKeys = ['wpaPsk', 'KeyPassphrase', 'PreSharedKey', 'PassPhrase', 'wifiPassword'];
+  static const _enableKeys = ['wlEnable', 'Enable'];
+  static const _maxKeys = ['MaxAssociatedDevices', 'wlMaxAssoc', 'MaxAssocDevices'];
+  static const _txKeys = ['TransmitPower', 'wlTxPower', 'X_ZYXEL_TransmitPower'];
+
+  static bool _truthy(dynamic v) => !(v == false || v == 0 || v == '0' || v == 'false');
+
   @override
   Future<WifiSettings> getWifiSettings() async {
-    final objs = await _dalGet(endpoints.wlanOid);
-    if (objs.isEmpty) throw const RouterException(RouterErrorCode.notSupported, 'wlan');
-    // Index 1 is the primary SSID on 2.4 GHz; with band steering both radios share it.
-    final primary = objs.firstWhere(
-      (o) => _pick(o, const ['wlEnable', 'Enable']) != false,
-      orElse: () => objs.first,
-    );
-    _lastWlanObject = primary;
-    _wlanIndex = _int(primary['Index']) ?? 1;
+    List<Map<String, dynamic>> objs = const [];
+    try {
+      objs = await _dalGet(endpoints.wlanOid);
+    } on RouterException catch (e) {
+      if (e.code != RouterErrorCode.notSupported) rethrow;
+    }
+    final withSsid = objs.where((o) => _pick(o, _ssidKeys) != null).toList();
+    if (withSsid.isNotEmpty) {
+      final primary = withSsid.firstWhere((o) => _truthy(_pick(o, _enableKeys)), orElse: () => withSsid.first);
+      _lastWlanObject = primary;
+      return WifiSettings(
+        ssid: '${_pick(primary, _ssidKeys) ?? ''}',
+        password: '${_pick(primary, _passKeys) ?? ''}',
+        enabled: _truthy(_pick(primary, _enableKeys)),
+        maxClients: _int(_pick(primary, _maxKeys)) ?? 32,
+        txPowerPercent: _int(_pick(primary, _txKeys)) ?? 100,
+        hidden: _pick(primary, const ['wlHide']) == true,
+      );
+    }
+    // Fallback: the status page lists every SSID with its password.
+    final status = (await _dalGetFirst(endpoints.statusOids)).first;
+    final wifi = (status['WiFiInfo'] as List?)?.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList() ??
+        const [];
+    if (wifi.isEmpty) throw const RouterException(RouterErrorCode.notSupported, 'no Wi-Fi info');
+    final primary = wifi.firstWhere((w) => _truthy(w['Enable']), orElse: () => wifi.first);
     return WifiSettings(
-      ssid: '${_pick(primary, const ['SSID', 'wlSsid']) ?? ''}',
-      password: '${_pick(primary, const ['wpaPsk', 'KeyPassphrase', 'PreSharedKey', 'PassPhrase']) ?? ''}',
-      enabled: _pick(primary, const ['wlEnable', 'Enable']) != false,
-      maxClients: _int(_pick(primary, const ['MaxAssociatedDevices', 'wlMaxAssoc', 'MaxAssocDevices'])) ?? 32,
-      txPowerPercent: _int(_pick(primary, const ['TransmitPower', 'wlTxPower', 'X_ZYXEL_TransmitPower'])) ?? 100,
-      hidden: _pick(primary, const ['wlHide']) == true,
+      ssid: '${primary['SSID'] ?? ''}',
+      password: '${primary['wifiPassword'] ?? ''}',
+      enabled: _truthy(primary['Enable']),
     );
   }
 
   @override
   Future<void> updateWifiSettings(WifiSettings settings) async {
-    final base = _lastWlanObject ?? {'Index': _wlanIndex};
+    final base = _lastWlanObject;
+    if (base == null) {
+      throw const RouterException(RouterErrorCode.notSupported, 'Wi-Fi object (oid=wlan) not available');
+    }
     final out = Map<String, dynamic>.from(base);
-    // Write back using whichever key name the firmware used when reading.
     void put(List<String> keys, Object value) {
       final key = keys.firstWhere(out.containsKey, orElse: () => keys.first);
       out[key] = value;
     }
 
-    put(const ['SSID', 'wlSsid'], settings.ssid);
-    put(const ['wpaPsk', 'KeyPassphrase', 'PreSharedKey', 'PassPhrase'], settings.password);
-    put(const ['wlEnable', 'Enable'], settings.enabled);
-    put(const ['MaxAssociatedDevices', 'wlMaxAssoc', 'MaxAssocDevices'], settings.maxClients);
-    put(const ['TransmitPower', 'wlTxPower', 'X_ZYXEL_TransmitPower'], settings.txPowerPercent);
+    put(_ssidKeys, settings.ssid);
+    put(_passKeys, settings.password);
+    put(_enableKeys, settings.enabled);
+    if (_pick(base, _maxKeys) != null) put(_maxKeys, settings.maxClients);
+    if (_pick(base, _txKeys) != null) put(_txKeys, settings.txPowerPercent);
     await _dalWrite(endpoints.wlanOid, out);
     _lastWlanObject = out;
   }
 
+  // ---- DNS ----------------------------------------------------------------------
+
   @override
   Future<DnsSettings> getDns() async {
-    final objs = await _dalGet(endpoints.lanDnsOid);
-    final lan = objs.first;
+    final lan = (await _dalGet(endpoints.lanDnsOid)).first;
     final type = '${_pick(lan, const ['DNS_Type', 'DNSType']) ?? ''}'.toLowerCase();
     // "From ISP" / "DNS Proxy" mean the router relays the ISP's DNS.
     if (!(type.contains('static') || type.contains('user'))) return const DnsSettings();
@@ -576,8 +649,7 @@ class ZyxelVmg3625Driver extends RouterDriver {
 
   @override
   Future<void> setDns(DnsSettings dns) async {
-    final objs = await _dalGet(endpoints.lanDnsOid);
-    final out = Map<String, dynamic>.from(objs.first);
+    final out = Map<String, dynamic>.from((await _dalGet(endpoints.lanDnsOid)).first);
     final typeKey = out.containsKey('DNSType') ? 'DNSType' : 'DNS_Type';
     final s1 = out.containsKey('DNSServer1') ? 'DNSServer1' : 'DNS_Servers1';
     final s2 = out.containsKey('DNSServer2') ? 'DNSServer2' : 'DNS_Servers2';
@@ -591,22 +663,21 @@ class ZyxelVmg3625Driver extends RouterDriver {
     await _dalWrite(endpoints.lanDnsOid, out);
   }
 
+  // ---- Reboot ----------------------------------------------------------------------
+
   @override
   Future<void> rebootRouter() async {
-    if (!isLoggedIn) await login();
     try {
-      final res = await _dio.post<String>(endpoints.reboot);
-      if (res.statusCode != 200) {
-        throw RouterException(RouterErrorCode.unexpectedResponse, 'HTTP ${res.statusCode}');
+      final body = await _write('POST', endpoints.reboot);
+      if (body is Map && body['result'] != null && body['result'] != 'ZCFG_SUCCESS') {
+        throw RouterException(RouterErrorCode.unexpectedResponse, _preview(body));
       }
-    } on DioException catch (e) {
+    } on RouterException catch (e) {
       // The router may drop the connection while going down: that's success.
-      if (e.type != DioExceptionType.connectionError &&
-          e.type != DioExceptionType.receiveTimeout) {
-        throw RouterException(RouterErrorCode.unreachable, e.message);
-      }
+      if (e.code != RouterErrorCode.unreachable) rethrow;
     }
     _sessionKey = null;
+    _probed = false;
   }
 
   @override
@@ -615,8 +686,31 @@ class ZyxelVmg3625Driver extends RouterDriver {
   }
 
   // ---------------------------------------------------------------------------
-  // Parsing helpers (lenient across firmware builds)
+  // Helpers
   // ---------------------------------------------------------------------------
+
+  static final _secretKey = RegExp(r'pass|psk|key|secret|token', caseSensitive: false);
+
+  /// Removes passwords, Wi-Fi keys and session keys before anything is shown
+  /// or logged.
+  static dynamic redactSecrets(dynamic v) {
+    if (v is Map) {
+      return {
+        for (final e in v.entries)
+          '${e.key}': _secretKey.hasMatch('${e.key}') && e.value is! Map && e.value is! List
+              ? '***'
+              : redactSecrets(e.value),
+      };
+    }
+    if (v is List) return v.map(redactSecrets).toList();
+    return v;
+  }
+
+  static String _preview(dynamic body) {
+    final clean = redactSecrets(body);
+    final s = clean is String ? clean : jsonEncode(clean);
+    return s.length > 200 ? '${s.substring(0, 200)}…' : s;
+  }
 
   static dynamic _decodeJson(String? raw) {
     if (raw == null || raw.isEmpty) return null;
@@ -636,32 +730,37 @@ class ZyxelVmg3625Driver extends RouterDriver {
   }
 
   static int? _int(dynamic v) {
-    if (v == null) return null;
+    if (v == null || v is bool) return null;
     if (v is int) return v;
     if (v is num) return v.toInt();
     return int.tryParse('$v'.trim());
   }
 
-  static Map<String, dynamic>? _asMap(dynamic v) =>
-      v is Map ? Map<String, dynamic>.from(v) : null;
+  static Map<String, dynamic>? _asMap(dynamic v) => v is Map ? Map<String, dynamic>.from(v) : null;
 
   static Map<String, dynamic>? _firstMap(dynamic v) {
-    if (v is List && v.isNotEmpty && v.first is Map) return Map<String, dynamic>.from(v.first as Map);
+    if (v is List) {
+      final m = v.whereType<Map>().firstOrNull;
+      return m == null ? null : Map<String, dynamic>.from(m);
+    }
     return _asMap(v);
   }
 
-  /// Picks the internet WAN out of a WanLanInfo list (skips LAN / IPTV / VoIP).
+  /// Internet WAN out of WanLanInfo (skips LAN / IPTV / VoIP / management).
   static Map<String, dynamic>? _pickWan(dynamic v) {
     if (v is! List) return _asMap(v);
     final maps = v.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).toList();
+    Map<String, dynamic>? firstWan;
     for (final m in maps) {
-      final name = '${m['Name'] ?? m['Alias'] ?? ''}'.toLowerCase();
+      final name = '${m['X_ZYXEL_SrvName'] ?? m['Name'] ?? m['Alias'] ?? ''}'.toLowerCase();
       final type = '${m['Type'] ?? ''}'.toLowerCase();
-      if (type == 'lan' || name.contains('lan') || name.contains('iptv') || name.contains('voip')) {
+      if (type == 'lan' || name == 'lan' || name.contains('iptv') || name.contains('voip') ||
+          name.contains('tr069') || name.contains('mgmt')) {
         continue;
       }
-      if ('${m['Status']}'.toLowerCase() == 'up') return m;
+      firstWan ??= m;
+      if ('${m['Status']}'.toLowerCase() == 'up' && _wanIp(m) != null) return m;
     }
-    return maps.isEmpty ? null : maps.first;
+    return firstWan ?? maps.firstOrNull;
   }
 }

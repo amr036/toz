@@ -32,6 +32,13 @@ class _RouterAdminScreenState extends ConsumerState<RouterAdminScreen> {
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setNavigationDelegate(NavigationDelegate(
           onProgress: (p) => setState(() => _progress = p),
+          // Stay on the router: never navigate to other hosts from here …
+          onNavigationRequest: (req) => Uri.tryParse(req.url)?.host == _uri!.host
+              ? NavigationDecision.navigate
+              : NavigationDecision.prevent,
+          // … so accepting the router's self-signed certificate is limited
+          // to the gateway itself.
+          onSslAuthError: (error) => error.proceed(),
         ))
         ..loadRequest(_uri!);
     }

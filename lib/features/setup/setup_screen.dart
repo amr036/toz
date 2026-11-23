@@ -27,7 +27,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
   final _ip = TextEditingController(text: AppConfig.defaultGatewayIp);
   final _user = TextEditingController(text: 'admin');
   final _pass = TextEditingController();
-  bool _https = false;
+  bool _https = true; // ZYXEL T50 web UI is HTTPS-only; the driver falls back to HTTP
   bool _obscure = true;
   bool _busy = false;
 

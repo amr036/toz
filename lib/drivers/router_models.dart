@@ -239,6 +239,7 @@ enum RouterErrorCode {
   invalidCredentials,
   sessionExpired,
   tooManySessions,
+  lockedOut,
   unsupportedFirmware,
   notSupported,
   unexpectedResponse,

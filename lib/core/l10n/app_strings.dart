@@ -49,8 +49,12 @@ class AppStrings {
     'err_invalidCredentials': {'en': 'Wrong username or password.', 'ar': 'اسم المستخدم أو كلمة المرور غير صحيحة.'},
     'err_sessionExpired': {'en': 'Session expired, reconnecting…', 'ar': 'انتهت الجلسة، جارٍ إعادة الاتصال…'},
     'err_tooManySessions': {
-      'en': 'Router reports another active admin session. Log out of the web UI and retry.',
-      'ar': 'يوجد جلسة إدارة أخرى مفتوحة على الراوتر. سجّل الخروج منها ثم أعد المحاولة.',
+      'en': 'The router allows only one admin session. Log out of the router page in your browser (or wait 5 minutes) and retry.',
+      'ar': 'الراوتر يسمح بجلسة إدارة واحدة فقط. سجّل الخروج من صفحة الراوتر في المتصفح (أو انتظر ٥ دقائق) ثم أعد المحاولة.',
+    },
+    'err_lockedOut': {
+      'en': 'The router locked the admin account after failed logins. Wait a minute, check the password, and try again.',
+      'ar': 'الراوتر قفل حساب الإدارة مؤقتاً بعد محاولات دخول خاطئة. انتظر دقيقة وتأكد من كلمة المرور ثم أعد المحاولة.',
     },
     'err_unsupportedFirmware': {'en': 'This firmware version is not supported yet.', 'ar': 'إصدار السوفت وير غير مدعوم حالياً.'},
     'err_notSupported': {'en': 'Not supported by this router / firmware.', 'ar': 'غير مدعوم في هذا الراوتر أو السوفت وير.'},

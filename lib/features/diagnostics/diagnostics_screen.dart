@@ -42,6 +42,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
       credentials: widget.credentials,
       model: settings.model,
       demoMode: settings.demoMode,
+      existingDriver: ref.read(sessionProvider).driver,
       onUpdate: (r) {
         if (mounted) setState(() => _report = r);
       },
