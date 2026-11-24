@@ -46,6 +46,10 @@ class AppStrings {
       'en': 'Router not reachable. Are you on its Wi-Fi? Check the gateway IP.',
       'ar': 'لا يمكن الوصول للراوتر. تأكد أنك متصل بالواي فاي الخاص به وراجع عنوان IP.',
     },
+    'err_notOnLan': {
+      'en': "This phone isn't on the router's network. Connect to the home Wi-Fi (not mobile data) and try again.",
+      'ar': 'الموبايل غير متصل بشبكة الراوتر. اتصل بواي فاي البيت (وليس بيانات الموبايل) ثم أعد المحاولة.',
+    },
     'err_invalidCredentials': {'en': 'Wrong username or password.', 'ar': 'اسم المستخدم أو كلمة المرور غير صحيحة.'},
     'err_sessionExpired': {'en': 'Session expired, reconnecting…', 'ar': 'انتهت الجلسة، جارٍ إعادة الاتصال…'},
     'err_tooManySessions': {
@@ -196,6 +200,7 @@ class AppStrings {
     // Diagnostics
     'diagTitle': {'en': 'Connection test', 'ar': 'اختبار الاتصال'},
     'diagButton': {'en': 'Test connection', 'ar': 'اختبار الاتصال بالراوتر'},
+    'diag_network': {'en': 'Phone on home Wi-Fi', 'ar': 'الموبايل على واي فاي البيت'},
     'diag_reach': {'en': 'Reach router', 'ar': 'الوصول إلى الراوتر'},
     'diag_login': {'en': 'Log in', 'ar': 'تسجيل الدخول'},
     'diag_status': {'en': 'Router status', 'ar': 'حالة الراوتر'},
@@ -245,6 +250,29 @@ class AppStrings {
     'deviceUsageNote': {
       'en': 'Per-device usage is counted by this app from the router\'s per-device counters while the app or its background sync runs. Traffic between devices at home (e.g. casting) is included, so the total can differ slightly from the ISP figure.',
       'ar': 'استهلاك كل جهاز يحسبه التطبيق من عدادات الراوتر لكل جهاز أثناء تشغيل التطبيق أو المزامنة في الخلفية. يشمل ذلك النقل بين أجهزة البيت (مثل الكاست)، لذلك قد يختلف المجموع قليلاً عن رقم الشركة.',
+    },
+
+    // Router counter
+    'routerCounter': {'en': 'Router counter (since restart)', 'ar': 'عداد الراوتر (منذ آخر تشغيل)'},
+    'sinceBoot': {'en': 'Router running since', 'ar': 'الراوتر شغّال منذ'},
+    'routerCounterApplied': {
+      'en': 'Usage was corrected automatically from the router counter (it also counts time when the app was closed).',
+      'ar': 'تم تصحيح الاستهلاك تلقائياً من عداد الراوتر (يشمل الوقت الذي كان التطبيق فيه مقفولاً).',
+    },
+    'routerCounterMatches': {
+      'en': 'The app\'s count already covers the router counter. Used automatically if it ever gets ahead.',
+      'ar': 'حساب التطبيق يغطي عداد الراوتر. سيُستخدم العداد تلقائياً لو زاد عن حساب التطبيق.',
+    },
+    'routerCounterOldBoot': {
+      'en': 'The router was restarted before this cycle began, so its counter includes last cycle — the app\'s own count is used. Use "Calibrate" for the ISP figure.',
+      'ar': 'الراوتر اشتغل قبل بداية الدورة الحالية فعدّاده يشمل الدورة السابقة، لذلك يُستخدم حساب التطبيق. استخدم "معايرة" لإدخال رقم الشركة.',
+    },
+
+    'unnamedDevice': {'en': 'Unnamed', 'ar': 'جهاز بدون اسم'},
+    'thisPhone': {'en': 'This phone', 'ar': 'هذا الموبايل'},
+    'blockSelfWarning': {
+      'en': 'This is the phone you are using! It will lose internet, but this app keeps working on the home Wi-Fi so you can restore it from here.',
+      'ar': 'هذا هو الموبايل الذي تستخدمه الآن! سيُقطع عنه الإنترنت، لكن التطبيق سيظل يعمل على واي فاي البيت لتقدر ترجّعه من هنا.',
     },
 
     // Misc

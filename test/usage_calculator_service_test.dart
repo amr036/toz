@@ -156,4 +156,42 @@ void main() {
       expect(r.calibrationAdjustBytes, -42);
     });
   });
+
+  group('correction from router counter', () {
+    const q = QuotaSettings(quotaGb: 140, renewalDay: 1);
+    TrafficCounters ctr(int rx, int tx, DateTime t) => TrafficCounters(rxBytes: rx, txBytes: tx, timestamp: t);
+
+    test('router booted this cycle and counted more than the app → raised', () {
+      final now = DateTime(2026, 11, 24, 12);
+      final l = UsageLedger()
+        ..daily['2026-11-05'] = DailyUsage(rx: 20 * gb) // before boot day
+        ..daily['2026-11-22'] = DailyUsage(rx: 3 * gb); // after boot, app only saw a part
+      // Router up for 4 days (booted 20 Nov) and counted 30 GB since.
+      final added = svc.correctFromRouter(l, q, ctr(28 * gb, 2 * gb, now), const Duration(days: 4), now);
+      expect(added, 27 * gb);
+      expect(svc.stats(l, q, now).usedBytes, 50 * gb, reason: '20 GB before boot + 30 GB router counter');
+      expect(l.calibrationManual, isFalse);
+    });
+
+    test('never lowers the figure', () {
+      final now = DateTime(2026, 11, 24, 12);
+      final l = UsageLedger()..daily['2026-11-23'] = DailyUsage(rx: 40 * gb);
+      expect(svc.correctFromRouter(l, q, ctr(10 * gb, 0, now), const Duration(days: 2), now), 0);
+      expect(svc.stats(l, q, now).usedBytes, 40 * gb);
+    });
+
+    test('router booted before the cycle → counter not used', () {
+      final now = DateTime(2026, 11, 3, 12);
+      final l = UsageLedger();
+      expect(svc.correctFromRouter(l, q, ctr(90 * gb, 0, now), const Duration(days: 10), now), 0);
+    });
+
+    test('manual ISP calibration wins', () {
+      final now = DateTime(2026, 11, 24, 12);
+      final l = UsageLedger();
+      svc.calibrate(l, q, 12, now);
+      expect(svc.correctFromRouter(l, q, ctr(30 * gb, 0, now), const Duration(days: 1), now), 0);
+      expect(svc.stats(l, q, now).usedBytes, gbToBytes(12));
+    });
+  });
 }

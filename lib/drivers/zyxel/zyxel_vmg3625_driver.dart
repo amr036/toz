@@ -124,7 +124,13 @@ class ZyxelVmg3625Driver extends RouterDriver {
         root = null;
       }
     }
-    if (root == null) throw _netError(firstError!);
+    if (root == null) {
+      _netError(firstError!); // logs the cause
+      throw RouterException(
+        RouterErrorCode.unreachable,
+        'No answer over HTTPS or HTTP from ${credentials.gatewayIp} (${firstError.error ?? firstError.type.name})',
+      );
+    }
     _log('Using ${_dio.options.baseUrl}');
 
     try {
@@ -557,7 +563,7 @@ class ZyxelVmg3625Driver extends RouterDriver {
       }
     }
     return hosts.map((h) {
-      final name = '${_pick(h, const ['curHostName', 'HostName', 'X_ZYXEL_HostName', 'DeviceName']) ?? ''}';
+      final name = '${_pick(h, const ['X_ZYXEL_DeviceName', 'UserDefinedName', 'curHostName', 'HostName', 'X_ZYXEL_HostName', 'DeviceName']) ?? ''}';
       final mac = '${_pick(h, const ['PhysAddress', 'MACAddress']) ?? ''}'.toUpperCase();
       final active = _pick(h, const ['Active']);
       final band = _band(h);

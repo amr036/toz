@@ -263,6 +263,7 @@ class RouterException implements Exception {
 
 enum RouterErrorCode {
   unreachable,
+  notOnLan,
   invalidCredentials,
   sessionExpired,
   tooManySessions,

@@ -65,6 +65,7 @@ class UsageLedger {
     Map<String, DailyUsage>? daily,
     this.calibrationCycleKey,
     this.calibrationAdjustBytes = 0,
+    this.calibrationManual = false,
     this.resetCount = 0,
     this.lastResetAt,
   }) : daily = daily ?? {};
@@ -81,6 +82,10 @@ class UsageLedger {
   String? calibrationCycleKey;
   int calibrationAdjustBytes;
 
+  /// True when the user typed the ISP figure; automatic correction from the
+  /// router counter then stays out of the way for that cycle.
+  bool calibrationManual;
+
   /// Number of router counter resets (reboots) detected.
   int resetCount;
   DateTime? lastResetAt;
@@ -94,6 +99,7 @@ class UsageLedger {
         'daily': daily.map((k, v) => MapEntry(k, v.toJson())),
         'calibrationCycleKey': calibrationCycleKey,
         'calibrationAdjustBytes': calibrationAdjustBytes,
+        'calibrationManual': calibrationManual,
         'resetCount': resetCount,
         'lastResetAt': lastResetAt?.toIso8601String(),
       };
@@ -108,6 +114,7 @@ class UsageLedger {
             {},
         calibrationCycleKey: j['calibrationCycleKey'] as String?,
         calibrationAdjustBytes: (j['calibrationAdjustBytes'] as num?)?.toInt() ?? 0,
+        calibrationManual: j['calibrationManual'] as bool? ?? false,
         resetCount: (j['resetCount'] as num?)?.toInt() ?? 0,
         lastResetAt: j['lastResetAt'] == null ? null : DateTime.parse(j['lastResetAt'] as String),
       );

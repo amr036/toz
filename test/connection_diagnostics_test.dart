@@ -30,9 +30,9 @@ void main() {
   test('all steps pass against an HTTPS-only encrypted router', () async {
     final r = await run(creds());
     expect({for (final s in r.steps) s.id: s.status}, {
-      for (final id in ['reach', 'login', 'status', 'traffic', 'devices', 'wifi', 'dns', 'speed']) id: DiagStatus.ok,
+      for (final id in ['network', 'reach', 'login', 'status', 'traffic', 'devices', 'wifi', 'dns', 'speed']) id: DiagStatus.ok,
     });
-    expect(r.steps.first.detail, contains('HTTPS ✓'), reason: 'self-signed certificate accepted');
+    expect(r.steps.firstWhere((s) => s.id == 'reach').detail, contains('HTTPS ✓'), reason: 'self-signed certificate accepted');
     expect(r.steps.firstWhere((s) => s.id == 'login').detail, contains('HTTPS'));
     expect(r.trace.join('\n'), contains('oid=qos'), reason: 'report includes field layout');
     expect(server.logoutCount, 1);
@@ -61,8 +61,9 @@ void main() {
 
   test('unreachable router reports the real cause for both schemes', () async {
     final r = await run(const RouterCredentials(gatewayIp: '127.0.0.1:1', username: 'admin', password: 'x'));
-    expect(r.steps.first.status, DiagStatus.fail);
-    expect(r.steps.first.detail, allOf(contains('HTTPS ✗'), contains('HTTP ✗')));
-    expect(r.steps.first.detail, isNot(contains('(unknown)')));
+    final reach = r.steps.firstWhere((s) => s.id == 'reach');
+    expect(reach.status, DiagStatus.fail);
+    expect(reach.detail, allOf(contains('HTTPS ✗'), contains('HTTP ✗')));
+    expect(reach.detail, isNot(contains('(unknown)')));
   });
 }

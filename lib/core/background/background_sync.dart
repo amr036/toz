@@ -65,6 +65,10 @@ class BackgroundSync {
     try {
       await driver.login();
       final counters = await driver.getTrafficCounters();
+      Duration? uptime;
+      try {
+        uptime = (await driver.getRouterStatus()).uptime;
+      } catch (_) {}
       List<ConnectedDevice>? devices;
       try {
         devices = await driver.getConnectedDevices();
@@ -82,6 +86,7 @@ class BackgroundSync {
       final svc = UsageCalculatorService();
       final ledger = repo.loadLedger();
       svc.ingest(ledger, counters);
+      if (uptime != null) svc.correctFromRouter(ledger, repo.loadQuota(), counters, uptime, DateTime.now());
       await repo.saveLedger(ledger);
       await UsageAlerts.check(prefs, svc.stats(ledger, repo.loadQuota(), DateTime.now()), demo: false);
       return true;

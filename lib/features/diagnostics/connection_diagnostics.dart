@@ -2,6 +2,7 @@ import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/network/local_network.dart';
 import '../../drivers/driver_registry.dart';
 import '../../drivers/mock/mock_router_driver.dart';
 import '../../drivers/router_driver.dart';
@@ -184,6 +185,14 @@ class ConnectionDiagnostics {
       if (demoMode) {
         _log('Demo mode is ON: testing the simulated router. Turn demo mode off to test your real router.');
       } else {
+        await _step('network', () async {
+          final net = await localNetworkInfo(gatewayIp: credentials.gatewayIp);
+          _log('Phone network: ${net.describe()}');
+          if (!kIsWeb && !credentials.gatewayIp.startsWith('127.') && !net.sameSubnetAs(credentials.gatewayIp)) {
+            throw RouterException(RouterErrorCode.notOnLan, net.describe());
+          }
+          return net;
+        }, (n) => n.describe());
         final reached = await _step('reach', _reach, (s) => s);
         if (reached == null) {
           for (final id in ['login', 'status', 'traffic', 'devices', 'wifi', 'dns', 'speed']) {

@@ -23,6 +23,8 @@ class UsageState {
 
   bool get isCalibrated =>
       ledger.calibrationCycleKey == stats.cycle.key && ledger.calibrationAdjustBytes != 0;
+
+  bool get isManualCalibration => isCalibrated && ledger.calibrationManual;
 }
 
 final usageServiceProvider = Provider<UsageCalculatorService>((ref) => UsageCalculatorService());
@@ -56,9 +58,12 @@ class UsageController extends Notifier<UsageState> {
     );
   }
 
-  void ingest(TrafficCounters counters) {
+  void ingest(TrafficCounters counters, {Duration? routerUptime}) {
     final ledger = state.ledger.clone();
     final event = _svc.ingest(ledger, counters);
+    if (routerUptime != null) {
+      _svc.correctFromRouter(ledger, state.quota, counters, routerUptime, DateTime.now());
+    }
     _repo.saveLedger(ledger);
     _emit(ledger, event: event);
     final prefs = ref.read(sharedPrefsProvider);

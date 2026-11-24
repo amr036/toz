@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/l10n/app_strings.dart';
+import '../../core/network/local_network.dart';
 import '../../core/state/app_state.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/formatters.dart';
@@ -20,6 +21,24 @@ final devicesProvider = FutureProvider<List<ConnectedDevice>>((ref) async {
   ref.read(deviceUsageProvider.notifier).ingest(list);
   return list;
 });
+
+/// This phone's own LAN IP (to recognise "this phone" in the list).
+final phoneIpProvider = FutureProvider<String?>((ref) async {
+  final gw = ref.watch(sessionProvider.select((s) => s.driver?.credentials.gatewayIp));
+  return (await localNetworkInfo(gatewayIp: gw)).phoneIp;
+});
+
+/// Rough device type from the DHCP vendor class, for unnamed devices.
+String? vendorHint(String? vendor) {
+  final v = (vendor ?? '').toLowerCase();
+  if (v.isEmpty) return null;
+  if (v.contains('android')) return 'Android';
+  if (v.contains('msft')) return 'Windows';
+  if (v.contains('apple') || v.contains('iphone') || v.contains('ipad')) return 'Apple';
+  if (v.contains('udhcp') || v.contains('esp') || v.contains('tuya')) return 'IoT';
+  if (v.contains('dhcpcd') || v.contains('linux')) return 'Linux';
+  return vendor;
+}
 
 /// A row = a device the router lists now, or one with usage this cycle that
 /// is currently offline.
@@ -208,6 +227,9 @@ class _DeviceTile extends ConsumerWidget {
     final u = row.usage;
     final mono = TextStyle(fontFamily: 'monospace', fontSize: 11, color: scheme.onSurfaceVariant);
     final color = row.blocked ? AppColors.danger : _signalColor(d);
+    final phoneIp = ref.watch(phoneIpProvider).value;
+    final isThisPhone = d != null && phoneIp != null && d.ip == phoneIp;
+    final hint = row.name == row.mac ? vendorHint(d?.vendor) : null;
 
     return Opacity(
       opacity: row.online || row.blocked ? 1 : 0.55,
@@ -230,8 +252,13 @@ class _DeviceTile extends ConsumerWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(row.name,
-                      maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  Row(children: [
+                    Flexible(
+                      child: Text(hint == null ? row.name : '${context.tr('unnamedDevice')} · $hint',
+                          maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                    if (isThisPhone) ...[const SizedBox(width: 6), _Badge(context.tr('thisPhone'), AppColors.upload)],
+                  ]),
                   const SizedBox(height: 2),
                   Text('${d?.ip ?? '—'}  ·  ${row.mac}', style: mono, textDirection: TextDirection.ltr),
                   const SizedBox(height: 6),
@@ -322,12 +349,15 @@ Future<void> setDeviceBlocked(
   void Function(bool busy)? onBusy,
 }) async {
   if (block) {
+    final phoneIp = (await localNetworkInfo(gatewayIp: requireDriver(ref).credentials.gatewayIp)).phoneIp;
+    final self = phoneIp != null && phoneIp == device.ip;
+    if (!context.mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         icon: const Icon(Icons.block, color: AppColors.danger),
         title: Text(ctx.tr('blockTitle')),
-        content: Text('${ctx.tr('blockConfirm')}\n\n$name\n${device.mac}'),
+        content: Text('${ctx.tr(self ? 'blockSelfWarning' : 'blockConfirm')}\n\n$name\n${device.mac}'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(ctx.tr('cancel'))),
           FilledButton(

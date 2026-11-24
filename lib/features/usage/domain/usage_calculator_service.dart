@@ -149,13 +149,56 @@ class UsageCalculatorService {
     final raw = rawCycleBytes(ledger, cycle, quota.countUpload);
     ledger
       ..calibrationCycleKey = cycle.key
-      ..calibrationAdjustBytes = gbToBytes(usedGb) - raw;
+      ..calibrationAdjustBytes = gbToBytes(usedGb) - raw
+      ..calibrationManual = true;
+  }
+
+  /// Automatic correction from the router's own counter.
+  ///
+  /// The WAN counter counts everything since the router booted, even while
+  /// this app was closed. If the router booted inside the current billing
+  /// cycle, then:  real cycle usage ≥ (days the app recorded before the boot
+  /// day) + (router counter). When that is more than what the app has, the
+  /// cycle total is raised to it. Never lowers the figure and never
+  /// overrides a manual (ISP) calibration of the same cycle.
+  /// Returns the bytes added (0 if nothing changed).
+  int correctFromRouter(
+    UsageLedger ledger,
+    QuotaSettings quota,
+    TrafficCounters counters,
+    Duration uptime,
+    DateTime now,
+  ) {
+    final cycle = cycleFor(now, quota.renewalDay);
+    if (ledger.calibrationManual && ledger.calibrationCycleKey == cycle.key) return 0;
+    final boot = now.subtract(uptime);
+    if (boot.isBefore(cycle.start)) return 0; // counter includes last cycle
+
+    final bootDay = DateTime(boot.year, boot.month, boot.day);
+    var beforeBoot = 0;
+    ledger.daily.forEach((k, v) {
+      final d = parseDayKey(k);
+      if (cycle.contains(d) && d.isBefore(bootDay)) beforeBoot += v.total(countUpload: quota.countUpload);
+    });
+    final routerBytes = counters.rxBytes + (quota.countUpload ? counters.txBytes : 0);
+    final target = beforeBoot + routerBytes;
+    final current = stats(ledger, quota, now).usedBytes;
+    // Ignore tiny differences (polling lag).
+    if (target - current < 20 * 1000 * 1000) return 0;
+
+    final raw = rawCycleBytes(ledger, cycle, quota.countUpload);
+    ledger
+      ..calibrationCycleKey = cycle.key
+      ..calibrationAdjustBytes = target - raw
+      ..calibrationManual = false;
+    return target - current;
   }
 
   void clearCalibration(UsageLedger ledger) {
     ledger
       ..calibrationCycleKey = null
-      ..calibrationAdjustBytes = 0;
+      ..calibrationAdjustBytes = 0
+      ..calibrationManual = false;
   }
 
   /// Last [days] local days, oldest first, zero-filled.

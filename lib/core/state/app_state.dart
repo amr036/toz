@@ -9,6 +9,7 @@ import '../../drivers/mock/mock_router_driver.dart';
 import '../../drivers/router_driver.dart';
 import '../../features/usage/domain/usage_calculator_service.dart';
 import '../config/app_config.dart';
+import '../network/local_network.dart';
 import '../storage/secure_credentials_store.dart';
 import '../../features/devices/device_usage_controller.dart';
 import '../../features/usage/presentation/usage_controller.dart';
@@ -140,7 +141,17 @@ class SessionController extends Notifier<SessionState> {
       state = SessionState(phase: SessionPhase.connected, driver: driver);
       return true;
     } catch (e) {
-      state = SessionState(phase: SessionPhase.error, error: e);
+      var error = e;
+      if (e is RouterException && e.code == RouterErrorCode.unreachable && !settings.demoMode) {
+        // Tell "wrong network" apart from "router not answering".
+        final net = await localNetworkInfo(gatewayIp: creds.gatewayIp);
+        if (net.phoneIp != null && !net.sameSubnetAs(creds.gatewayIp)) {
+          error = RouterException(RouterErrorCode.notOnLan, net.describe());
+        } else if (net.phoneIp != null) {
+          error = RouterException(RouterErrorCode.unreachable, '${e.details} — ${net.describe()}');
+        }
+      }
+      state = SessionState(phase: SessionPhase.error, error: error);
       return false;
     }
   }
@@ -333,7 +344,7 @@ class LiveController extends Notifier<LiveState> {
       clearError: statusError == null,
       loading: false,
     );
-    ref.read(usageControllerProvider.notifier).ingest(counters);
+    ref.read(usageControllerProvider.notifier).ingest(counters, routerUptime: state.status?.uptime);
 
     // Per-device counters: every 4th poll (≈20 s on a real router).
     if (withStatus || _tick % 4 == 0 || state.devices == null) {

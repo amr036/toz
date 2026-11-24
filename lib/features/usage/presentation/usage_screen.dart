@@ -13,6 +13,7 @@ import '../../../core/utils/formatters.dart';
 import '../../../core/widgets/app_top_bar.dart';
 import '../../../core/widgets/common.dart';
 import '../domain/usage_models.dart';
+import '../../../core/state/app_state.dart';
 import 'usage_controller.dart';
 
 class UsageScreen extends ConsumerWidget {
@@ -45,6 +46,8 @@ class UsageScreen extends ConsumerWidget {
           const _HistoryChart(),
           SectionTitle(context.tr('quotaSettings')),
           _QuotaSettingsCard(quota: usage.quota),
+          const SizedBox(height: 12),
+          const _RouterCounterCard(),
           const SizedBox(height: 12),
           _CalibrationCard(state: usage),
           const SizedBox(height: 12),
@@ -541,13 +544,13 @@ class _CalibrationCard extends ConsumerWidget {
         leading: const Icon(Icons.tune),
         title: Text(context.tr('calibrate')),
         subtitle: Text(
-          state.isCalibrated
+          state.isManualCalibration
               ? '${context.tr('calibrated')} (${state.ledger.calibrationAdjustBytes >= 0 ? '+' : ''}'
                   '${gbLabel(state.ledger.calibrationAdjustBytes, decimals: 2)})'
               : context.tr('calibrateHint'),
           style: const TextStyle(fontSize: 12),
         ),
-        trailing: state.isCalibrated
+        trailing: state.isManualCalibration
             ? IconButton(
                 tooltip: context.tr('clearCalibration'),
                 icon: const Icon(Icons.close),
@@ -555,6 +558,52 @@ class _CalibrationCard extends ConsumerWidget {
               )
             : const Icon(Icons.chevron_right),
         onTap: () => _calibrate(context, ref),
+      ),
+    );
+  }
+}
+
+/// Shows the router's own counter since its last boot and whether the cycle
+/// total was corrected from it automatically.
+class _RouterCounterCard extends ConsumerWidget {
+  const _RouterCounterCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final live = ref.watch(liveProvider);
+    final usage = ref.watch(usageControllerProvider);
+    final scheme = Theme.of(context).colorScheme;
+    final c = live.counters;
+    final uptime = live.status?.uptime;
+    if (c == null) return const SizedBox.shrink();
+    final routerBytes = c.rxBytes + (usage.quota.countUpload ? c.txBytes : 0);
+    final boot = uptime == null ? null : DateTime.now().subtract(uptime);
+    final bootInCycle = boot != null && !boot.isBefore(usage.stats.cycle.start);
+    final auto = usage.isCalibrated && !usage.isManualCalibration;
+    final lang = Localizations.localeOf(context).languageCode;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.router_outlined, color: scheme.primary),
+            const SizedBox(width: 10),
+            Expanded(child: Text(context.tr('routerCounter'), style: Theme.of(context).textTheme.titleSmall)),
+            Text(gbLabel(routerBytes, decimals: 2), style: const TextStyle(fontWeight: FontWeight.w800)),
+          ]),
+          const SizedBox(height: 6),
+          if (boot != null)
+            Text(
+              '${context.tr('sinceBoot')} ${DateFormat.MMMd(lang).add_Hm().format(boot)}',
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+            ),
+          const SizedBox(height: 6),
+          Text(
+            context.tr(!bootInCycle ? 'routerCounterOldBoot' : (auto ? 'routerCounterApplied' : 'routerCounterMatches')),
+            style: TextStyle(fontSize: 12, color: auto ? AppColors.download : scheme.onSurfaceVariant),
+          ),
+        ]),
       ),
     );
   }
