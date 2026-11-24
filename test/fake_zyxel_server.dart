@@ -56,6 +56,8 @@ class FakeZyxelServer {
     'wpaPsk': '11223344',
     'MaxAssociatedDevices': 32,
     'TransmitPower': 100,
+    'subnetObjAction': 'none',
+    'X_ZYXEL_InternalFlag': 0,
   };
   /// LAN setup as read back from the router. Like real firmware, a PUT that
   /// echoes IPv6_IdentifierType back is rejected.
@@ -299,7 +301,19 @@ class FakeZyxelServer {
       case ('GET', 'wlan'):
         return ok(wlanAvailable ? [wlan] : []);
       case ('PUT', 'wlan'):
-        wlan = payload();
+        final p = payload();
+        // Like real firmware: internal fields echoed back are rejected, and
+        // (worst case) a changes-only body is refused too.
+        if (p.containsKey('subnetObjAction')) {
+          return reply({'result': 'ZCFG_INVALID_PARAM_VALUE', 'ReplyMsg': 'subnetObjAction', 'sessionkey': nextKey});
+        }
+        if (p.containsKey('X_ZYXEL_InternalFlag')) {
+          return reply({'result': 'ZCFG_INVALID_PARAM_VALUE', 'ReplyMsg': 'X_ZYXEL_InternalFlag', 'sessionkey': nextKey});
+        }
+        if (!p.containsKey('wlEnable')) {
+          return reply({'result': 'ZCFG_INVALID_PARAM_VALUE', 'ReplyMsg': 'wlEnable', 'sessionkey': nextKey});
+        }
+        wlan = {...wlan, ...p};
         return writeOk();
       case ('GET', 'lan'):
         return ok([lan]);

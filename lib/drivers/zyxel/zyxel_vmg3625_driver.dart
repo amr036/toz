@@ -332,6 +332,46 @@ class ZyxelVmg3625Driver extends RouterDriver {
     }
   }
 
+  /// Saves [changes] to an object the router returned as [original].
+  ///
+  /// Real VMG3625-T50B firmware returns read-only/internal fields on GET
+  /// (e.g. `subnetObjAction` on wlan, `IPv6_IdentifierType` on lan) and
+  /// rejects them on PUT with `ZCFG_INVALID_PARAM_VALUE` + `ReplyMsg: <field>`.
+  /// So: first send only the changed fields (+ identity keys); if that is
+  /// refused, send the full object and drop each field the router names,
+  /// until it accepts.
+  Future<void> _putTolerant(String oid, Map<String, dynamic> original, Map<String, dynamic> changes) async {
+    final identity = {
+      for (final k in const ['Index', 'Name', 'Group', 'Interface', 'BrName', 'IPAddress', 'SubnetMask', 'wlBand', 'Band'])
+        if (original.containsKey(k) && !changes.containsKey(k)) k: original[k],
+    };
+    final rejected = <String>[];
+    try {
+      await _dalWrite(oid, {...identity, ...changes});
+      return;
+    } on RouterException catch (e) {
+      if (e.code != RouterErrorCode.unexpectedResponse) rethrow;
+      _log('oid=$oid: changes-only save refused (${e.details}); trying full object');
+    }
+    final full = {...original, ...changes};
+    for (var attempt = 0; attempt < 12; attempt++) {
+      final body = await _write('PUT', endpoints.dal(oid), data: full);
+      if (body is Map && body['result'] == 'ZCFG_SUCCESS') {
+        if (rejected.isNotEmpty) _log('oid=$oid saved without: ${rejected.join(', ')}');
+        return;
+      }
+      final field = body is Map ? '${body['ReplyMsg'] ?? body['replyMsg'] ?? ''}' : '';
+      // Only drop fields we did not mean to change.
+      if (field.isEmpty || !full.containsKey(field) || changes.containsKey(field)) {
+        throw RouterException(RouterErrorCode.unexpectedResponse, 'oid=$oid → ${_preview(body)}');
+      }
+      _log('oid=$oid: router rejected field "$field" → retrying without it');
+      rejected.add(field);
+      full.remove(field);
+    }
+    throw RouterException(RouterErrorCode.unexpectedResponse, 'oid=$oid: too many rejected fields');
+  }
+
   Future<List<Map<String, dynamic>>> _dalGetFirst(List<String> oids) async {
     RouterException? last;
     for (final oid in oids) {
@@ -718,10 +758,10 @@ class ZyxelVmg3625Driver extends RouterDriver {
     if (base == null) {
       throw const RouterException(RouterErrorCode.notSupported, 'Wi-Fi object (oid=wlan) not available');
     }
-    final out = Map<String, dynamic>.from(base);
+    final changes = <String, dynamic>{};
     void put(List<String> keys, Object value) {
-      final key = keys.firstWhere(out.containsKey, orElse: () => keys.first);
-      out[key] = value;
+      final key = keys.firstWhere(base.containsKey, orElse: () => keys.first);
+      if (base[key] != value) changes[key] = value;
     }
 
     put(_ssidKeys, settings.ssid);
@@ -729,8 +769,9 @@ class ZyxelVmg3625Driver extends RouterDriver {
     put(_enableKeys, settings.enabled);
     if (_pick(base, _maxKeys) != null) put(_maxKeys, settings.maxClients);
     if (_pick(base, _txKeys) != null) put(_txKeys, settings.txPowerPercent);
-    await _dalWrite(endpoints.wlanOid, out);
-    _lastWlanObject = out;
+    if (changes.isEmpty) return;
+    await _putTolerant(endpoints.wlanOid, base, changes);
+    _lastWlanObject = {...base, ...changes};
   }
 
   // ---- DNS ----------------------------------------------------------------------
@@ -760,39 +801,7 @@ class ZyxelVmg3625Driver extends RouterDriver {
         s2: dns.secondary ?? '',
       },
     };
-    // Identity fields that tell the router which LAN object is meant.
-    final identity = {
-      for (final k in const ['Index', 'Name', 'Group', 'Interface', 'BrName', 'IPAddress', 'SubnetMask'])
-        if (lan.containsKey(k)) k: lan[k],
-    };
-
-    // Sending the whole object back fails on real firmware because of
-    // unrelated IPv6 fields ("IPv6_IdentifierType"), so try, in order:
-    //  1. only the DNS fields (+ identity),
-    //  2. the full object without any IPv6 fields,
-    //  3. the full object.
-    final attempts = <Map<String, dynamic>>[
-      {...identity, ...changes},
-      {
-        for (final e in lan.entries)
-          if (!e.key.toLowerCase().contains('ipv6') && !e.key.toLowerCase().startsWith('v6')) e.key: e.value,
-        ...changes,
-      },
-      {...lan, ...changes},
-    ];
-    RouterException? last;
-    for (var i = 0; i < attempts.length; i++) {
-      try {
-        await _dalWrite(endpoints.lanDnsOid, attempts[i]);
-        _log('DNS saved (attempt ${i + 1})');
-        return;
-      } on RouterException catch (e) {
-        if (e.code != RouterErrorCode.unexpectedResponse) rethrow;
-        _log('DNS attempt ${i + 1} rejected: ${e.details}');
-        last = e;
-      }
-    }
-    throw last!;
+    await _putTolerant(endpoints.lanDnsOid, lan, changes);
   }
 
   // ---- Reboot ----------------------------------------------------------------------

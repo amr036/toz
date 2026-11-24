@@ -130,6 +130,7 @@ void main() {
         expect(server.wlan['SSID'], 'NetPulse');
         expect(server.wlan['wpaPsk'], 'newpassword1');
         expect(server.wlan['MaxAssociatedDevices'], 10);
+        expect(server.staleCsrfRejections, 0);
       });
 
       test('DNS preset (router rejects echoed IPv6_IdentifierType, as on real hardware)', () async {
