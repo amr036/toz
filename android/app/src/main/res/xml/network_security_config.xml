@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Home routers (ZYXEL VMG3625-T50B at http://192.168.1.1) serve their admin API
+  over plain HTTP, and the gateway IP is user-configurable, so cleartext must
+  be allowed. The app never talks to any host other than the configured gateway.
+  Self-signed HTTPS certificates on the router are trusted via user CAs only.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
