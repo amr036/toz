@@ -22,6 +22,17 @@ class MockRouterDriver extends RouterDriver {
   static const demoUsername = 'admin';
   static const demoPassword = 'demo';
 
+  /// MAC → (name, share of traffic); also used to seed demo history.
+  static const demoDeviceShares = <String, (String, double)>{
+    'A4:C3:F0:12:9B:01': ('Galaxy S25', 0.30),
+    'F0:99:B6:7A:44:2C': ('iPhone-Mona', 0.18),
+    '7C:1C:68:AA:10:3E': ('Living-Room-TV', 0.32),
+    '00:1B:21:3C:8D:50': ('Desktop-PC', 0.12),
+    '3C:22:FB:91:0E:77': ('Laptop-Work', 0.06),
+    '24:6F:28:00:AB:CD': ('ESP32-Plug', 0.005),
+    '58:CB:52:19:E2:61': ('Tablet-Kids', 0.015),
+  };
+
   final Random _random;
   final DateTime Function() _clock;
 
@@ -35,6 +46,16 @@ class MockRouterDriver extends RouterDriver {
   double _tx = 1.9 * 1024 * 1024 * 1024;
 
   SpeedLimit _limit = const SpeedLimit.unlimited();
+
+  final _devices = <_MockDevice>[
+    _MockDevice('Galaxy S25', '192.168.1.34', 'A4:C3:F0:12:9B:01', WifiBand.band5, 5, share: 0.30),
+    _MockDevice('iPhone-Mona', '192.168.1.35', 'F0:99:B6:7A:44:2C', WifiBand.band5, 4, share: 0.18),
+    _MockDevice('Living-Room-TV', '192.168.1.40', '7C:1C:68:AA:10:3E', WifiBand.band24, 3, share: 0.32),
+    _MockDevice('Desktop-PC', '192.168.1.10', '00:1B:21:3C:8D:50', WifiBand.ethernet, 0, share: 0.12),
+    _MockDevice('Laptop-Work', '192.168.1.22', '3C:22:FB:91:0E:77', WifiBand.band5, 4, share: 0.06),
+    _MockDevice('ESP32-Plug', '192.168.1.51', '24:6F:28:00:AB:CD', WifiBand.band24, 2, share: 0.005),
+    _MockDevice('Tablet-Kids', '192.168.1.37', '58:CB:52:19:E2:61', WifiBand.band24, 3, share: 0.015),
+  ];
   WifiSettings _wifi = const WifiSettings(
     ssid: 'NetPulse_Home_5G',
     password: 'P@ssw0rd2026',
@@ -89,8 +110,19 @@ class MockRouterDriver extends RouterDriver {
       upMbps = min(upMbps, cap * 0.6);
     }
 
-    _rx += downMbps * 1e6 / 8 * secs;
-    _tx += upMbps * 1e6 / 8 * secs;
+    // Blocked devices get no internet: their share is simply not used.
+    final online = _devices.where((d) => d.active && !d.blocked);
+    final totalShare = online.fold<double>(0, (a, d) => a + d.share);
+    final blockedShare = _devices.where((d) => d.blocked).fold<double>(0, (a, d) => a + d.share);
+    final factor = 1 - blockedShare.clamp(0.0, 0.9);
+    final dDown = downMbps * factor * 1e6 / 8 * secs;
+    final dUp = upMbps * factor * 1e6 / 8 * secs;
+    _rx += dDown;
+    _tx += dUp;
+    for (final d in online) {
+      d.down += dDown * d.share / totalShare;
+      d.up += dUp * d.share / totalShare;
+    }
   }
 
   @override
@@ -161,16 +193,29 @@ class MockRouterDriver extends RouterDriver {
   Future<List<ConnectedDevice>> getConnectedDevices() async {
     await _latency();
     _ensure();
-    int sig(int base) => base - _random.nextInt(6);
+    _tick();
     return [
-      ConnectedDevice(name: 'Galaxy S25', ip: '192.168.1.34', mac: 'A4:C3:F0:12:9B:01', band: WifiBand.band5, signalDbm: sig(-48)),
-      ConnectedDevice(name: 'iPhone-Mona', ip: '192.168.1.35', mac: 'F0:99:B6:7A:44:2C', band: WifiBand.band5, signalDbm: sig(-55)),
-      ConnectedDevice(name: 'Living-Room-TV', ip: '192.168.1.40', mac: '7C:1C:68:AA:10:3E', band: WifiBand.band24, signalDbm: sig(-63)),
-      const ConnectedDevice(name: 'Desktop-PC', ip: '192.168.1.10', mac: '00:1B:21:3C:8D:50', band: WifiBand.ethernet),
-      ConnectedDevice(name: 'Laptop-Work', ip: '192.168.1.22', mac: '3C:22:FB:91:0E:77', band: WifiBand.band5, signalDbm: sig(-58)),
-      ConnectedDevice(name: 'ESP32-Plug', ip: '192.168.1.51', mac: '24:6F:28:00:AB:CD', band: WifiBand.band24, signalDbm: sig(-72)),
-      ConnectedDevice(name: 'Tablet-Kids', ip: '192.168.1.37', mac: '58:CB:52:19:E2:61', band: WifiBand.band24, signalDbm: sig(-66), active: _random.nextBool()),
+      for (final d in _devices)
+        ConnectedDevice(
+          name: d.name,
+          ip: d.ip,
+          mac: d.mac,
+          band: d.band,
+          signalLevel: d.band == WifiBand.ethernet ? null : (d.level - _random.nextInt(2)).clamp(1, 5),
+          active: d.active,
+          blocked: d.blocked,
+          downloadedBytes: d.down.round(),
+          uploadedBytes: d.up.round(),
+        ),
     ];
+  }
+
+  @override
+  Future<void> setDeviceBlocked(String mac, bool blocked) async {
+    await _latency();
+    _ensure();
+    _tick();
+    _devices.firstWhere((d) => d.mac == mac.toUpperCase()).blocked = blocked;
   }
 
   @override
@@ -214,9 +259,27 @@ class MockRouterDriver extends RouterDriver {
     Timer(const Duration(seconds: 8), () {
       _rx = 0;
       _tx = 0;
+      for (final d in _devices) {
+        d.down = 0;
+        d.up = 0;
+      }
       _bootTime = _clock();
       _lastTick = _clock();
       _rebooting = false;
     });
   }
+}
+
+class _MockDevice {
+  _MockDevice(this.name, this.ip, this.mac, this.band, this.level, {required this.share});
+  final String name;
+  final String ip;
+  final String mac;
+  final WifiBand band;
+  final int level;
+  final double share;
+  bool active = true;
+  bool blocked = false;
+  double down = 0;
+  double up = 0;
 }

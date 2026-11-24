@@ -19,6 +19,7 @@ class ZyxelEndpoints {
     this.lanDnsOid = 'lan',
     this.qosOid = 'qos',
     this.qosShaperOid = 'qos_shaper',
+    this.parentalOid = 'paren_ctl',
     this.shaperInterfaceHints = const ['wl', 'wifi', 'wlan', 'ssid'],
   });
 
@@ -41,6 +42,9 @@ class ZyxelEndpoints {
   final String lanDnsOid;
   final String qosOid;
   final String qosShaperOid;
+
+  /// Parental control profiles — used to cut a device's internet access.
+  final String parentalOid;
 
   /// Shaper rows whose interface name contains one of these are treated as
   /// the Wi-Fi/LAN-side (download) shaper. Falls back to the first row.

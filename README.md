@@ -19,6 +19,8 @@ It focuses on **internet usage tracking (حساب الاستهلاك)** and **Wi
 | **Wi-Fi control** | Speed presets (Unlimited, 2, 6, 10, 20 Mbps, or a custom 1–100 Mbps slider) with an Apply button and an "active" badge. SSID and password, max clients, transmit power, and DNS presets (ISP default, Cloudflare 1.1.1.1, Cloudflare Family, AdGuard Family, Google, custom) |
 | **Devices** | Name, IP, MAC, band (2.4 GHz / 5 GHz / Ethernet), signal strength, online/offline |
 | **Background sync** | Android WorkManager reads the router counters about every 15 minutes while the app is closed, so usage keeps counting and reboots aren't missed. It is skipped in demo mode and while the app itself is polling |
+| **Per-device usage** | Each device's usage this billing cycle (GB, % of quota, share of all devices, today), from the router's per-device counters (`lanhosts` `X_ZYXEL_BytesSent` = downloaded, `X_ZYXEL_BytesReceived` = uploaded). Counter resets on reconnect or reboot are handled. Devices can be renamed in the app |
+| **Cut a device's internet** | A switch per device. On ZYXEL this creates a Parental Control profile (`paren_ctl`) named `NP-<MAC tail>` with that MAC and an all-week 00:00–23:59 block window. Restoring deletes that profile; your own profiles are never touched |
 | **Quota alerts** | Android notifications at 75 / 90 / 100 %, each sent once per billing cycle, from the app or the background job |
 
 ## Project structure

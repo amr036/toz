@@ -2,7 +2,7 @@ name: netpulse_router_manager
 description: "NetPulse Router Manager — local home-router manager focused on internet usage tracking and Wi-Fi speed control."
 publish_to: 'none'
 
-version: 1.0.2+3
+version: 1.1.0+4
 
 environment:
   sdk: ^3.14.0

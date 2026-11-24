@@ -94,6 +94,35 @@ void main() {
         expect(d.map((x) => x.active), [true, true, false]);
       });
 
+      test('devices: 0-5 signal level, per-device bytes (Sent = downloaded)', () async {
+        final d = await driver.getConnectedDevices();
+        expect(d[0].signalLevel, 4);
+        expect(d[0].signalDbm, isNull, reason: 'was wrongly shown as "4 dBm"');
+        expect(d[1].signalLevel, isNull, reason: 'wired');
+        expect(d[0].downloadedBytes, 5000000000);
+        expect(d[0].uploadedBytes, 300000000);
+      });
+
+      test('block / unblock a device through a parental-control profile', () async {
+        const mac = 'A4:C3:F0:12:9B:01';
+        await driver.setDeviceBlocked(mac, true);
+        final p = server.parental.singleWhere((e) => e['pcpName'] == ZyxelVmg3625Driver.profileName(mac));
+        expect(p['MACAddressList'], mac);
+        expect(p['pcpEnable'], 1);
+        expect(p['TimeRangeList'], '00:00-23:59');
+        expect(p['Days'], 'Mon,Tue,Wed,Thu,Fri,Sat,Sun');
+        expect(server.parentalMaster, '1');
+        expect((await driver.getConnectedDevices()).first.blocked, isTrue);
+
+        await driver.setDeviceBlocked(mac, true); // idempotent: no duplicate profile
+        expect(server.parental.where((e) => e['pcpName'] == ZyxelVmg3625Driver.profileName(mac)), hasLength(1));
+
+        await driver.setDeviceBlocked(mac, false);
+        expect(server.parental.map((e) => e['pcpName']), ['Kids-Night'], reason: "user's own profile kept");
+        expect((await driver.getConnectedDevices()).first.blocked, isFalse);
+        expect(server.staleCsrfRejections, 0);
+      });
+
       test('wifi settings round-trip keeps firmware key names', () async {
         final w = await driver.getWifiSettings();
         expect(w.ssid, 'WE_ABC123');
@@ -103,11 +132,15 @@ void main() {
         expect(server.wlan['MaxAssociatedDevices'], 10);
       });
 
-      test('DNS preset', () async {
+      test('DNS preset (router rejects echoed IPv6_IdentifierType, as on real hardware)', () async {
         expect((await driver.getDns()).primary, isNull);
         await driver.setDns(DnsSettings.fromPreset(DnsPreset.adguardFamily));
         expect(server.lan['DNSServer1'], '94.140.14.15');
+        expect(server.lan['DNSType'], 'Static');
+        expect(server.lan['IPAddress'], '192.168.1.1', reason: 'LAN IP untouched');
         expect((await driver.getDns()).primary, '94.140.14.15');
+        await driver.setDns(const DnsSettings());
+        expect((await driver.getDns()).primary, isNull);
       });
 
       test('re-logs in after the router drops an idle session', () async {

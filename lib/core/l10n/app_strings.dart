@@ -218,6 +218,35 @@ class AppStrings {
     'diagCopied': {'en': 'Report copied', 'ar': 'تم نسخ التقرير'},
     'diagDetails': {'en': 'Technical details', 'ar': 'تفاصيل تقنية'},
 
+
+    // Device usage & blocking
+    'blockedCount': {'en': 'blocked', 'ar': 'مقطوع'},
+    'topUsers': {'en': 'Top users this cycle', 'ar': 'الأكثر استهلاكاً في هذه الدورة'},
+    'thisCycleShort': {'en': 'this cycle', 'ar': 'هذه الدورة'},
+    'thisCycle': {'en': 'Used this cycle', 'ar': 'استهلاك هذه الدورة'},
+    'ofQuota': {'en': 'of quota', 'ar': 'من الباقة'},
+    'ofQuotaLong': {'en': 'Share of the monthly quota', 'ar': 'نسبته من الباقة الشهرية'},
+    'shareOfDevices': {'en': 'Share of all devices', 'ar': 'نسبته من استهلاك كل الأجهزة'},
+    'today': {'en': 'Today', 'ar': 'اليوم'},
+    'connection': {'en': 'Connection', 'ar': 'نوع الاتصال'},
+    'signal': {'en': 'Signal', 'ar': 'قوة الإشارة'},
+    'blocked': {'en': 'Internet cut', 'ar': 'النت مقطوع'},
+    'internetAccess': {'en': 'Internet access', 'ar': 'الوصول للإنترنت'},
+    'blockTitle': {'en': 'Cut internet?', 'ar': 'قطع الإنترنت؟'},
+    'blockConfirm': {
+      'en': 'This device will stay on the Wi-Fi but lose internet access until you turn it back on.',
+      'ar': 'سيبقى الجهاز متصلاً بالواي فاي لكن بدون إنترنت حتى تعيد تشغيله من هنا.',
+    },
+    'blockAction': {'en': 'Cut internet', 'ar': 'اقطع الإنترنت'},
+    'unblockAction': {'en': 'Restore internet', 'ar': 'أرجِع الإنترنت'},
+    'blockedDone': {'en': 'Internet cut for this device', 'ar': 'تم قطع الإنترنت عن الجهاز'},
+    'unblockedDone': {'en': 'Internet restored', 'ar': 'تم إرجاع الإنترنت للجهاز'},
+    'renameDevice': {'en': 'Rename device', 'ar': 'تسمية الجهاز'},
+    'deviceUsageNote': {
+      'en': 'Per-device usage is counted by this app from the router\'s per-device counters while the app or its background sync runs. Traffic between devices at home (e.g. casting) is included, so the total can differ slightly from the ISP figure.',
+      'ar': 'استهلاك كل جهاز يحسبه التطبيق من عدادات الراوتر لكل جهاز أثناء تشغيل التطبيق أو المزامنة في الخلفية. يشمل ذلك النقل بين أجهزة البيت (مثل الكاست)، لذلك قد يختلف المجموع قليلاً عن رقم الشركة.',
+    },
+
     // Misc
     'language': {'en': 'العربية', 'ar': 'English'},
   };

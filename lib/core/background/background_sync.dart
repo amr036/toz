@@ -3,6 +3,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../../drivers/driver_registry.dart';
+import '../../drivers/router_models.dart';
+import '../../features/devices/device_usage_controller.dart';
+import '../../features/devices/domain/device_usage.dart';
 import '../../features/usage/data/usage_repository.dart';
 import '../../features/usage/domain/usage_calculator_service.dart';
 import '../config/app_config.dart';
@@ -62,7 +65,18 @@ class BackgroundSync {
     try {
       await driver.login();
       final counters = await driver.getTrafficCounters();
+      List<ConnectedDevice>? devices;
+      try {
+        devices = await driver.getConnectedDevices();
+      } catch (_) {}
       await driver.logout();
+
+      if (devices != null) {
+        final devRepo = DeviceLedgerRepository(prefs, demo: false);
+        final devLedger = devRepo.load();
+        DeviceUsageService().ingest(devLedger, devices, DateTime.now());
+        await devRepo.save(devLedger);
+      }
 
       final repo = UsageRepository(prefs, demo: false);
       final svc = UsageCalculatorService();

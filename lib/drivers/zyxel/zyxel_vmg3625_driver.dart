@@ -215,10 +215,12 @@ class ZyxelVmg3625Driver extends RouterDriver {
       final secs = RegExp(r'\d+').firstMatch(reply)?.group(0);
       throw RouterException(RouterErrorCode.lockedOut, secs == null ? result : '$secs s');
     }
-    if (lower.contains('duplicat') || lower.contains('already') || lower.contains('limit')) {
+    if (lower.contains('duplicat') || lower.contains('already') || lower.contains('limit') ||
+        lower.contains('a user exist') || lower.contains('maxium') || lower.contains('maximum')) {
       throw RouterException(RouterErrorCode.tooManySessions, result);
     }
     if (lower.contains('invalid') || lower.contains('password') || lower.contains('incorrect') ||
+        lower.contains('permission denied') ||
         res.statusCode == 401) {
       throw RouterException(RouterErrorCode.invalidCredentials, result);
     }
@@ -544,6 +546,7 @@ class ZyxelVmg3625Driver extends RouterDriver {
   @override
   Future<List<ConnectedDevice>> getConnectedDevices() async {
     final objs = await _dalGet(endpoints.lanHostsOid);
+    final blockedMacs = await _blockedMacs();
     final hosts = <Map<String, dynamic>>[];
     for (final o in objs) {
       final list = o['lanhosts'] ?? o['LanHosts'] ?? o['Hosts'];
@@ -557,15 +560,106 @@ class ZyxelVmg3625Driver extends RouterDriver {
       final name = '${_pick(h, const ['curHostName', 'HostName', 'X_ZYXEL_HostName', 'DeviceName']) ?? ''}';
       final mac = '${_pick(h, const ['PhysAddress', 'MACAddress']) ?? ''}'.toUpperCase();
       final active = _pick(h, const ['Active']);
+      final band = _band(h);
+      // ZYXEL reports 0-5 bars in X_ZYXEL_SignalStrength (0 for wired);
+      // a negative number would be dBm.
+      final sig = _int(_pick(h, const ['X_ZYXEL_SignalStrength', 'SignalStrength', 'RSSI']));
       return ConnectedDevice(
         name: name.isEmpty ? mac : name,
         ip: '${_pick(h, const ['IPAddress', 'IPv4Address']) ?? '-'}',
         mac: mac,
-        band: _band(h),
-        signalDbm: _int(_pick(h, const ['X_ZYXEL_SignalStrength', 'SignalStrength', 'RSSI'])),
-        active: !(active == false || active == 0 || active == '0' || active == 'false'),
+        band: band,
+        signalDbm: sig != null && sig < 0 ? sig : null,
+        signalLevel: sig != null && sig >= 0 && band != WifiBand.ethernet ? sig.clamp(0, 5) : null,
+        active: _truthy(active ?? true),
+        blocked: blockedMacs.contains(mac) || _truthy(h['Internet_Blocking_Enable'] ?? false),
+        // Router-side counters: "Sent" = router → device = downloaded.
+        downloadedBytes: _int(_pick(h, const ['X_ZYXEL_BytesSent', 'BytesSent'])),
+        uploadedBytes: _int(_pick(h, const ['X_ZYXEL_BytesReceived', 'BytesReceived'])),
+        vendor: _pick(h, const ['VendorClassID'])?.toString(),
       );
     }).toList();
+  }
+
+  // ---- Blocking (Parental Control) ------------------------------------------
+  //
+  // The T50 firmware blocks a device through a Parental Control profile
+  // (oid=paren_ctl) holding its MAC and an all-week, all-day block window.
+  // The app owns profiles named "NP-<last 6 MAC hex>" and deletes them to
+  // unblock, leaving the user's own profiles untouched.
+
+  static const _days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  static String profileName(String mac) => 'NP-${mac.replaceAll(':', '').toUpperCase().substring(6)}';
+
+  static String _normMac(String mac) => mac.toUpperCase().replaceAll('-', ':');
+
+  Future<List<Map<String, dynamic>>> _profiles() async {
+    try {
+      return await _dalGet(endpoints.parentalOid);
+    } on RouterException catch (e) {
+      if (e.code == RouterErrorCode.notSupported) return const [];
+      rethrow;
+    }
+  }
+
+  /// MACs currently blocked by profiles this app created.
+  Future<Set<String>> _blockedMacs() async {
+    final out = <String>{};
+    for (final p in await _profiles()) {
+      if (!'${p['pcpName']}'.startsWith('NP-') || !_truthy(p['pcpEnable'] ?? 1)) continue;
+      for (final m in '${p['MACAddressList'] ?? ''}'.split(',')) {
+        if (m.trim().isNotEmpty) out.add(_normMac(m.trim()));
+      }
+    }
+    return out;
+  }
+
+  @override
+  Future<void> setDeviceBlocked(String mac, bool blocked) async {
+    final m = _normMac(mac);
+    final name = profileName(m);
+    final existing = (await _profiles()).where((p) => p['pcpName'] == name).toList();
+    if (blocked) {
+      if (existing.isNotEmpty) {
+        final p = Map<String, dynamic>.from(existing.first)
+          ..['pcpEnable'] = 1
+          ..['MACAddressList'] = m
+          ..['Days'] = _days
+          ..['TimeRangeList'] = '00:00-23:59';
+        await _dalWrite(endpoints.parentalOid, p);
+      } else {
+        await _dalWrite(
+          endpoints.parentalOid,
+          {
+            'pcpName': name,
+            'pcpEnable': 1,
+            'MACAddressList': m,
+            'Days': _days,
+            'TimeRangeList': '00:00-23:59',
+            'ServicePolicy': 'Block',
+            'UrlPolicy': 'Block',
+            'WebRedirect': 0,
+            'URLFilter': '',
+            'NetworkServiceList': '',
+          },
+          create: true,
+        );
+      }
+      // Parental control must be switched on globally for profiles to apply.
+      try {
+        await _dalWrite(endpoints.parentalOid, {'PrentalCtlEnable': '1'});
+      } on RouterException catch (e) {
+        _log('Enabling parental control globally failed (may already be on): ${e.details}');
+      }
+    } else {
+      for (final p in existing) {
+        final body = await _write('DELETE', '${endpoints.dal(endpoints.parentalOid)}&Index=${p['Index']}');
+        if (body is Map && body['result'] != null && body['result'] != 'ZCFG_SUCCESS') {
+          throw RouterException(RouterErrorCode.unexpectedResponse, _preview(body));
+        }
+      }
+    }
   }
 
   // ---- Wi-Fi ------------------------------------------------------------------
@@ -649,18 +743,50 @@ class ZyxelVmg3625Driver extends RouterDriver {
 
   @override
   Future<void> setDns(DnsSettings dns) async {
-    final out = Map<String, dynamic>.from((await _dalGet(endpoints.lanDnsOid)).first);
-    final typeKey = out.containsKey('DNSType') ? 'DNSType' : 'DNS_Type';
-    final s1 = out.containsKey('DNSServer1') ? 'DNSServer1' : 'DNS_Servers1';
-    final s2 = out.containsKey('DNSServer2') ? 'DNSServer2' : 'DNS_Servers2';
-    if (dns.primary == null) {
-      out[typeKey] = 'DNS Proxy';
-    } else {
-      out[typeKey] = 'Static';
-      out[s1] = dns.primary;
-      out[s2] = dns.secondary ?? '';
+    final lan = Map<String, dynamic>.from((await _dalGet(endpoints.lanDnsOid)).first);
+    final typeKey = lan.containsKey('DNSType') ? 'DNSType' : 'DNS_Type';
+    final s1 = lan.containsKey('DNSServer1') ? 'DNSServer1' : 'DNS_Servers1';
+    final s2 = lan.containsKey('DNSServer2') ? 'DNSServer2' : 'DNS_Servers2';
+    final changes = <String, dynamic>{
+      if (dns.primary == null) typeKey: 'DNS Proxy' else ...{
+        typeKey: 'Static',
+        s1: dns.primary,
+        s2: dns.secondary ?? '',
+      },
+    };
+    // Identity fields that tell the router which LAN object is meant.
+    final identity = {
+      for (final k in const ['Index', 'Name', 'Group', 'Interface', 'BrName', 'IPAddress', 'SubnetMask'])
+        if (lan.containsKey(k)) k: lan[k],
+    };
+
+    // Sending the whole object back fails on real firmware because of
+    // unrelated IPv6 fields ("IPv6_IdentifierType"), so try, in order:
+    //  1. only the DNS fields (+ identity),
+    //  2. the full object without any IPv6 fields,
+    //  3. the full object.
+    final attempts = <Map<String, dynamic>>[
+      {...identity, ...changes},
+      {
+        for (final e in lan.entries)
+          if (!e.key.toLowerCase().contains('ipv6') && !e.key.toLowerCase().startsWith('v6')) e.key: e.value,
+        ...changes,
+      },
+      {...lan, ...changes},
+    ];
+    RouterException? last;
+    for (var i = 0; i < attempts.length; i++) {
+      try {
+        await _dalWrite(endpoints.lanDnsOid, attempts[i]);
+        _log('DNS saved (attempt ${i + 1})');
+        return;
+      } on RouterException catch (e) {
+        if (e.code != RouterErrorCode.unexpectedResponse) rethrow;
+        _log('DNS attempt ${i + 1} rejected: ${e.details}');
+        last = e;
+      }
     }
-    await _dalWrite(endpoints.lanDnsOid, out);
+    throw last!;
   }
 
   // ---- Reboot ----------------------------------------------------------------------

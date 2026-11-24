@@ -51,6 +51,8 @@ class RouterCapabilities {
     this.canEditWifi = true,
     this.canLimitClients = true,
     this.canSetTxPower = true,
+    this.canBlockDevices = true,
+    this.perDeviceTraffic = true,
   });
 
   final SpeedLimitMethod speedLimitMethod;
@@ -59,6 +61,12 @@ class RouterCapabilities {
   final bool canEditWifi;
   final bool canLimitClients;
   final bool canSetTxPower;
+
+  /// Can cut a single device's internet access.
+  final bool canBlockDevices;
+
+  /// Router reports per-device byte counters (for per-device usage).
+  final bool perDeviceTraffic;
 }
 
 class RouterCredentials {
@@ -163,15 +171,34 @@ class ConnectedDevice {
     required this.mac,
     required this.band,
     this.signalDbm,
+    this.signalLevel,
     this.active = true,
+    this.blocked = false,
+    this.downloadedBytes,
+    this.uploadedBytes,
+    this.vendor,
   });
 
   final String name;
   final String ip;
   final String mac;
   final WifiBand band;
+
+  /// Signal in dBm when the router reports it (negative number).
   final int? signalDbm;
+
+  /// Signal as 0-5 bars (what ZYXEL reports).
+  final int? signalLevel;
   final bool active;
+
+  /// Internet access cut by the app / router.
+  final bool blocked;
+
+  /// Cumulative counters as seen by the router (reset when the device
+  /// reconnects or the router reboots). Router→device = downloaded.
+  final int? downloadedBytes;
+  final int? uploadedBytes;
+  final String? vendor;
 }
 
 class WifiSettings {

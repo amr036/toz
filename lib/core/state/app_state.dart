@@ -10,6 +10,7 @@ import '../../drivers/router_driver.dart';
 import '../../features/usage/domain/usage_calculator_service.dart';
 import '../config/app_config.dart';
 import '../storage/secure_credentials_store.dart';
+import '../../features/devices/device_usage_controller.dart';
 import '../../features/usage/presentation/usage_controller.dart';
 
 /// Overridden in main() with the loaded instance.
@@ -183,8 +184,11 @@ class LiveState {
     this.updatedAt,
     this.error,
     this.loading = false,
+    this.devices,
   });
 
+  /// Latest device list (refreshed every few polls).
+  final List<ConnectedDevice>? devices;
   final RouterStatus? status;
   final TrafficCounters? counters;
   final double downBps;
@@ -208,8 +212,10 @@ class LiveState {
     Object? error,
     bool clearError = false,
     bool? loading,
+    List<ConnectedDevice>? devices,
   }) =>
       LiveState(
+        devices: devices ?? this.devices,
         status: status ?? this.status,
         counters: counters ?? this.counters,
         downBps: downBps ?? this.downBps,
@@ -328,6 +334,26 @@ class LiveController extends Notifier<LiveState> {
       loading: false,
     );
     ref.read(usageControllerProvider.notifier).ingest(counters);
+
+    // Per-device counters: every 4th poll (≈20 s on a real router).
+    if (withStatus || _tick % 4 == 0 || state.devices == null) {
+      await refreshDevices(driver);
+    }
+  }
+
+  /// Fetches the device list and feeds per-device usage. Never throws.
+  Future<List<ConnectedDevice>?> refreshDevices([RouterDriver? d]) async {
+    final driver = d ?? ref.read(sessionProvider).driver;
+    if (driver == null) return null;
+    try {
+      final devices = await driver.getConnectedDevices();
+      if (!ref.mounted) return devices;
+      state = state.copyWith(devices: devices);
+      ref.read(deviceUsageProvider.notifier).ingest(devices);
+      return devices;
+    } catch (_) {
+      return null; // shown by the devices screen itself
+    }
   }
 }
 

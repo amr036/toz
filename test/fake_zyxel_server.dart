@@ -57,7 +57,25 @@ class FakeZyxelServer {
     'MaxAssociatedDevices': 32,
     'TransmitPower': 100,
   };
-  Map<String, dynamic> lan = {'Index': 1, 'DNSType': 'DNS Proxy', 'DNSServer1': '', 'DNSServer2': ''};
+  /// LAN setup as read back from the router. Like real firmware, a PUT that
+  /// echoes IPv6_IdentifierType back is rejected.
+  Map<String, dynamic> lan = {
+    'Index': 1,
+    'IPAddress': '192.168.1.1',
+    'SubnetMask': '255.255.255.0',
+    'DNSType': 'DNS Proxy',
+    'DNSServer1': '',
+    'DNSServer2': '',
+    'IPv6_IdentifierType': 'EUI64',
+    'IPv6_LinkLocalAddressType': 'EUI64',
+  };
+
+  /// Parental control profiles + master switch.
+  List<Map<String, dynamic>> parental = [
+    {'Index': 1, 'pcpName': 'Kids-Night', 'pcpEnable': 1, 'MACAddressList': '58:CB:52:19:E2:61', 'Days': 'Mon,Tue', 'TimeRangeList': '23:00-23:59'},
+  ];
+  String parentalMaster = '0';
+  int deviceBytes = 0;
 
   /// QoS → General. Field names are an assumption; the driver discovers the
   /// downstream field by name ("…Down…").
@@ -272,8 +290,8 @@ class FakeZyxelServer {
           {
             'wanInfo': {'wanStatus': 'Up'},
             'lanhosts': [
-              {'HostName': 'galaxy', 'curHostName': 'Galaxy-S25', 'IPAddress': '192.168.1.34', 'PhysAddress': 'a4:c3:f0:12:9b:01', 'X_ZYXEL_ConnectionType': 'Wi-Fi', 'Layer1Interface': 'Device.WiFi.SSID.5', 'X_ZYXEL_OperatingStandard': 'ac', 'X_ZYXEL_SignalStrength': -51, 'Active': true},
-              {'HostName': '', 'IPAddress': '192.168.1.10', 'PhysAddress': '00:1b:21:3c:8d:50', 'X_ZYXEL_ConnectionType': 'Ethernet', 'Layer1Interface': 'Device.Ethernet.Interface.2', 'Active': 1},
+              {'HostName': 'galaxy', 'curHostName': 'Galaxy-S25', 'IPAddress': '192.168.1.34', 'PhysAddress': 'a4:c3:f0:12:9b:01', 'X_ZYXEL_ConnectionType': 'Wi-Fi', 'Layer1Interface': 'Device.WiFi.SSID.5', 'X_ZYXEL_OperatingStandard': 'ac', 'X_ZYXEL_SignalStrength': 4, 'X_ZYXEL_BytesSent': 5000000000 + deviceBytes, 'X_ZYXEL_BytesReceived': 300000000, 'Active': true},
+              {'HostName': '', 'IPAddress': '192.168.1.10', 'PhysAddress': '00:1b:21:3c:8d:50', 'X_ZYXEL_ConnectionType': 'Ethernet', 'Layer1Interface': 'Device.Ethernet.Interface.2', 'X_ZYXEL_SignalStrength': 0, 'Active': 1},
               {'HostName': 'TV', 'IPAddress': '192.168.1.40', 'PhysAddress': '7c:1c:68:aa:10:3e', 'X_ZYXEL_ConnectionType': 'Wi-Fi', 'Layer1Interface': 'WiFi.SSID.1', 'X_ZYXEL_OperatingStandard': 'n', 'Active': false},
             ],
           }
@@ -286,7 +304,33 @@ class FakeZyxelServer {
       case ('GET', 'lan'):
         return ok([lan]);
       case ('PUT', 'lan'):
-        lan = payload();
+        final p = payload();
+        if (p.containsKey('IPv6_IdentifierType')) {
+          return reply({'result': 'ZCFG_INVALID_PARAM_VALUE', 'ReplyMsg': 'IPv6_IdentifierType', 'sessionkey': nextKey});
+        }
+        lan = {...lan, ...p};
+        return writeOk();
+      case ('GET', 'paren_ctl'):
+        return ok(parental);
+      case ('POST', 'paren_ctl'):
+        final p = payload();
+        if (p['Days'] is! List) {
+          return reply({'result': 'ZCFG_INVALID_PARAM_VALUE', 'ReplyMsg': 'Days', 'sessionkey': nextKey});
+        }
+        final next = parental.fold<int>(0, (m, e) => max(m, e['Index'] as int)) + 1;
+        parental.add({...p, 'Index': next, 'Days': (p['Days'] as List).join(',')});
+        return writeOk();
+      case ('PUT', 'paren_ctl'):
+        final p = payload();
+        if (p.containsKey('PrentalCtlEnable') && p.length == 1) {
+          parentalMaster = '${p['PrentalCtlEnable']}';
+          return writeOk();
+        }
+        parental = [for (final e in parental) e['Index'] == p['Index'] ? {...p, 'Days': (p['Days'] as List).join(',')} : e];
+        return writeOk();
+      case ('DELETE', 'paren_ctl'):
+        final idx = int.parse(req.uri.queryParameters['Index']!);
+        parental.removeWhere((e) => e['Index'] == idx);
         return writeOk();
       case ('GET', 'qos'):
         return ok([qos]);

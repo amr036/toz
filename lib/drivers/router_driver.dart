@@ -49,6 +49,9 @@ abstract class RouterDriver {
 
   Future<void> rebootRouter();
 
+  /// Cuts (or restores) internet access for one device, by MAC address.
+  Future<void> setDeviceBlocked(String mac, bool blocked);
+
   /// URL of the router's own web admin UI (used by the WebView fallback).
   Uri get adminPageUri => Uri.parse(credentials.baseUrl);
 
