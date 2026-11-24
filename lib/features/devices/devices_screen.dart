@@ -229,7 +229,8 @@ class _DeviceTile extends ConsumerWidget {
     final color = row.blocked ? AppColors.danger : _signalColor(d);
     final phoneIp = ref.watch(phoneIpProvider).value;
     final isThisPhone = d != null && phoneIp != null && d.ip == phoneIp;
-    final hint = row.name == row.mac ? vendorHint(d?.vendor) : null;
+    final unnamed = row.name.toUpperCase() == row.mac;
+    final hint = unnamed ? vendorHint(d?.vendor) : null;
 
     return Opacity(
       opacity: row.online || row.blocked ? 1 : 0.55,
@@ -254,10 +255,26 @@ class _DeviceTile extends ConsumerWidget {
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Row(children: [
                     Flexible(
-                      child: Text(hint == null ? row.name : '${context.tr('unnamedDevice')} · $hint',
-                          maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                      child: Text(
+                        unnamed ? (hint == null ? context.tr('unnamedDevice') : '${context.tr('unnamedDevice')} · $hint') : row.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          decoration: unnamed ? TextDecoration.underline : null,
+                          decorationStyle: TextDecorationStyle.dotted,
+                        ),
+                      ),
                     ),
-                    if (isThisPhone) ...[const SizedBox(width: 6), _Badge(context.tr('thisPhone'), AppColors.upload)],
+                    InkResponse(
+                      radius: 18,
+                      onTap: () => renameDevice(context, ref, row.mac, routerName: d?.name, vendor: d?.vendor),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        child: Icon(Icons.edit_outlined, size: 16, color: unnamed ? scheme.primary : scheme.onSurfaceVariant),
+                      ),
+                    ),
+                    if (isThisPhone) ...[const SizedBox(width: 2), _Badge(context.tr('thisPhone'), AppColors.upload)],
                   ]),
                   const SizedBox(height: 2),
                   Text('${d?.ip ?? '—'}  ·  ${row.mac}', style: mono, textDirection: TextDirection.ltr),
@@ -386,26 +403,8 @@ class _DeviceSheet extends ConsumerWidget {
   const _DeviceSheet({required this.row});
   final _Row row;
 
-  Future<void> _rename(BuildContext context, WidgetRef ref) async {
-    final ctrl = TextEditingController(text: row.usage?.track.nickname ?? '');
-    final v = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(ctx.tr('renameDevice')),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          maxLength: 32,
-          decoration: InputDecoration(hintText: row.device?.name ?? row.mac),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(ctx.tr('cancel'))),
-          FilledButton(onPressed: () => Navigator.pop(ctx, ctrl.text), child: Text(ctx.tr('save'))),
-        ],
-      ),
-    );
-    if (v != null) await ref.read(deviceUsageProvider.notifier).rename(row.mac, v);
-  }
+  Future<void> _rename(BuildContext context, WidgetRef ref) =>
+      renameDevice(context, ref, row.mac, routerName: row.device?.name, vendor: row.device?.vendor);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -472,4 +471,76 @@ class _DeviceSheet extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Lets the user give a device a name (stored on this phone, per MAC).
+/// Offers the router's own name and common device types as one-tap picks.
+Future<void> renameDevice(
+  BuildContext context,
+  WidgetRef ref,
+  String mac, {
+  String? routerName,
+  String? vendor,
+}) async {
+  final current = ref.read(deviceUsageProvider).of(mac)?.track.nickname ??
+      ref.read(deviceUsageProvider).ledger.devices[mac.toUpperCase()]?.nickname;
+  final ctrl = TextEditingController(text: current ?? '');
+  final picks = <String>[
+    if (routerName != null && routerName.toUpperCase() != mac.toUpperCase()) routerName,
+    for (final k in const ['pickPhone', 'pickLaptop', 'pickTv', 'pickTablet', 'pickPc', 'pickConsole', 'pickCamera'])
+      context.tr(k),
+  ];
+  final hint = vendorHint(vendor);
+
+  final v = await showDialog<String>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => AlertDialog(
+        icon: const Icon(Icons.edit_outlined),
+        title: Text(ctx.tr('renameDevice')),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(mac, textDirection: TextDirection.ltr, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+            if (hint != null) Text('${ctx.tr('deviceType')}: $hint', style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLength: 32,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (t) => Navigator.pop(ctx, t),
+              decoration: InputDecoration(
+                hintText: ctx.tr('renameHint'),
+                suffixIcon: ctrl.text.isEmpty
+                    ? null
+                    : IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(ctrl.clear)),
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            Wrap(spacing: 6, runSpacing: 6, children: [
+              for (final p in picks)
+                ActionChip(
+                  label: Text(p),
+                  onPressed: () => setState(() {
+                    // Types are a prefix: "موبايل " → "موبايل أحمد".
+                    final isRouterName = p == routerName;
+                    ctrl.text = isRouterName ? p : '$p ';
+                    ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
+                  }),
+                ),
+            ]),
+          ]),
+        ),
+        actions: [
+          if (current != null)
+            TextButton(onPressed: () => Navigator.pop(ctx, ''), child: Text(ctx.tr('removeName'))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(ctx.tr('cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, ctrl.text), child: Text(ctx.tr('save'))),
+        ],
+      ),
+    ),
+  );
+  if (v == null) return;
+  await ref.read(deviceUsageProvider.notifier).rename(mac, v);
+  if (context.mounted) showSnack(context, context.tr(v.trim().isEmpty ? 'nameRemoved' : 'nameSaved'));
 }

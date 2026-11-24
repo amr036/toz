@@ -275,6 +275,19 @@ class AppStrings {
       'ar': 'هذا هو الموبايل الذي تستخدمه الآن! سيُقطع عنه الإنترنت، لكن التطبيق سيظل يعمل على واي فاي البيت لتقدر ترجّعه من هنا.',
     },
 
+    'renameHint': {'en': 'e.g. Ahmed\'s phone', 'ar': 'مثلاً: موبايل أحمد'},
+    'deviceType': {'en': 'Type', 'ar': 'النوع'},
+    'removeName': {'en': 'Remove name', 'ar': 'حذف الاسم'},
+    'nameSaved': {'en': 'Name saved', 'ar': 'تم حفظ الاسم'},
+    'nameRemoved': {'en': 'Name removed', 'ar': 'تم حذف الاسم'},
+    'pickPhone': {'en': 'Phone', 'ar': 'موبايل'},
+    'pickLaptop': {'en': 'Laptop', 'ar': 'لابتوب'},
+    'pickTv': {'en': 'TV', 'ar': 'تلفزيون'},
+    'pickTablet': {'en': 'Tablet', 'ar': 'تابلت'},
+    'pickPc': {'en': 'PC', 'ar': 'كمبيوتر'},
+    'pickConsole': {'en': 'Console', 'ar': 'بلايستيشن'},
+    'pickCamera': {'en': 'Camera', 'ar': 'كاميرا'},
+
     // Misc
     'language': {'en': 'العربية', 'ar': 'English'},
   };
